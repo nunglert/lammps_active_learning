@@ -62,6 +62,10 @@ class LammpsSamplingInput(ScriptInput):
     lammps_args: str = "-k on g 1 -sf kk -pk kokkos newton on neigh half"
     # torch device for the MACE committee scoring ("cuda" or "cpu").
     device: str = "cuda"
+    # Convert the MACE model to cuequivariance before compiling it for LAMMPS
+    # (production default). False compiles the plain e3nn model and drops the
+    # cuequivariance requirement, so a CPU-only build (e.g. CI) can run.
+    enable_cueq: bool = True
 
     def validate(self, root: Optional[Path] = None) -> None:
         """Validate configuration parameters.

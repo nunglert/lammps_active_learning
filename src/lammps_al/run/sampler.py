@@ -72,6 +72,9 @@ class LammpsSampler(Sampler):
             (inserted between ``-in`` and ``-log``). Defaults to KOKKOS-on-GPU;
             pass a CPU variant (or "") for a non-GPU build.
         device: torch device for the MACE committee scoring ("cuda" or "cpu").
+        enable_cueq: Convert the MACE model to cuequivariance before compiling
+            it for LAMMPS (production default). Set False to compile the plain
+            e3nn model without the cuequivariance requirement (CPU builds).
         stub: Dry-run without a cluster; emit mock samples for testing
     """
 
@@ -89,6 +92,7 @@ class LammpsSampler(Sampler):
         loop_time: float = 30,
         lammps_args: str = "-k on g 1 -sf kk -pk kokkos newton on neigh half",
         device: str = "cuda",
+        enable_cueq: bool = True,
         stub: bool = False,
     ):
         super().__init__()
@@ -104,6 +108,7 @@ class LammpsSampler(Sampler):
         self.remote_lammps_executable_path = remote_lammps_executable_path
         self.lammps_args = lammps_args
         self.device = device
+        self.enable_cueq = enable_cueq
         self.remote_savepath = remote_savepath
         self.loop_time = loop_time
         self.stub = stub
@@ -141,6 +146,7 @@ class LammpsSampler(Sampler):
                 "seed": np.random.randint(1e6),
                 "lammps_args": self.lammps_args,
                 "device": self.device,
+                "enable_cueq": self.enable_cueq,
             }
 
             self.script_input_file = self.results_dir / "input_sample.json"

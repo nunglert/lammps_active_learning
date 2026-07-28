@@ -76,6 +76,7 @@ def create_lammps_mliap_model(
     float32: bool = False,
     do_return_path: bool = False,
     out_path: Optional[pathlib.Path] = None,
+    enable_cueq: bool = True,
 ) -> Optional[pathlib.Path]:
     """Compile a MACE model for use in LAMMPS
 
@@ -85,6 +86,10 @@ def create_lammps_mliap_model(
         float32: Compile a 32-bit model
         do_return_path: Return a pathlib.Path for the compiled model
         out_path: Path to file to save the compiled model to
+        enable_cueq: Convert the model to the cuequivariance (cueq)
+            acceleration before compiling (the production default). Set False
+            to compile the plain e3nn model -- this drops the ``cuequivariance``
+            requirement, so a CPU-only build (e.g. CI) can compile it.
 
     Returns:
         If requested, path to the compiled model
@@ -93,7 +98,6 @@ def create_lammps_mliap_model(
 
     import torch
     from mace.calculators.lammps_mliap_mace import LAMMPS_MLIAP_MACE
-    from mace.cli.convert_e3nn_cueq import run as run_e3nn_to_cueq
 
     if out_path is not None:
         compiled_path = out_path
@@ -113,7 +117,11 @@ def create_lammps_mliap_model(
         model = model.float().to("cpu")
     else:
         model = model.double().to("cpu")
-    model = run_e3nn_to_cueq(deepcopy(model))
+    if enable_cueq:
+        # Lazy import: cuequivariance is only needed for the cueq conversion.
+        from mace.cli.convert_e3nn_cueq import run as run_e3nn_to_cueq
+
+        model = run_e3nn_to_cueq(deepcopy(model))
     model.lammps_mliap = True
     lammps_model = LAMMPS_MLIAP_MACE(model, head=head)
     torch.save(lammps_model, compiled_path.resolve())
@@ -355,7 +363,9 @@ def main(argv: Optional[list] = None) -> None:
     full_traj_file = outpath / "traj+uncertainties.xyz"
 
     mliap_path = create_lammps_mliap_model(
-        model_path=model_paths[0], do_return_path=True
+        model_path=model_paths[0],
+        do_return_path=True,
+        enable_cueq=input_config.enable_cueq,
     )
 
     trajectory = run_lammps_from_template(

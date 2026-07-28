@@ -80,6 +80,7 @@ def test_full_payload_smoke(tmp_path):
         "seed": 12345,
         "lammps_args": _CPU_LAMMPS_ARGS,
         "device": "cpu",
+        "enable_cueq": False,  # plain e3nn compile: no cuequivariance on CPU
     }
     input_file = calc / "input_sample.json"
     input_file.write_text(json.dumps(config))

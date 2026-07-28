@@ -118,7 +118,10 @@ lammps-smoke:
         "ssh://git@gitlab.tuwien.ac.at/"
     - pip install --no-cache-dir
         "remote_handler @ git+ssh://git@gitlab.tuwien.ac.at/e165-03-1_theoretische_materialchemie/madsen-s-research-group/remote_handler.git@dev-NU"
-    - pip install --no-cache-dir . --no-deps
+    # Install this package + its [dev] extra (pytest). NOT [run]: the heavy
+    # mace/torch stack is already in the image, and remote_handler was installed
+    # above. Base ([ase, numpy]) + [dev] are light and won't touch torch/mace.
+    - pip install --no-cache-dir ".[dev]"
     # --- LAMMPS diagnostics (none of these fail the job) --------------------
     # Is lmp on PATH? (no pipe: `... | head` would SIGPIPE lmp and, under the
     # runner's `set -o pipefail`, fail the job).
