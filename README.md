@@ -67,13 +67,27 @@ Versions come from git tags via `setuptools-scm`: tag `vX.Y.Z` and
 ## Tests
 
 ```bash
-pytest                    # everything
-pytest -m integration     # the sampler/input tests (need remote_handler)
+pytest                    # all tiers (each self-skips when its dep is absent)
+pytest -m local           # pure payload logic (ase+numpy+jinja2 only)
+pytest -m integration     # sampler/input + MACE-committee scoring (needs remote_handler + mace)
+pytest -m lammps          # real lmp smoke test (needs a MACE-enabled lmp on PATH)
 ```
 
-All tests self-skip (`importorskip("remote_handler")`) when the `[run]`
-producer is absent; the stub-mode sampler tests otherwise run with no cluster,
-SSH, LAMMPS, or MACE.
+Three tiers cover the sampling machinery at rising cost:
+
+- **`local`** — the payload's pure helpers (jinja render, local-uncertainty
+  aggregation, segment/argmax selection) with no producer, MACE, or LAMMPS.
+- **`integration`** — the sampler + input schema, and `get_samples_from_dump`
+  driven end-to-end on CPU with a real MACE committee over a synthesized LAMMPS
+  dump (no `lmp`, no GPU). Self-skips when `remote_handler`/`mace` are absent.
+- **`lammps`** — a full end-to-end smoke run against a real MACE-enabled `lmp`
+  (compile MLIAP model → short MD → committee-score → select). Self-skips unless
+  such an `lmp` is on PATH; in CI it runs on the prebuilt `lammps-mace` image
+  (`docker/Dockerfile.lammps-mace`).
+
+The payload is import-safe and its accelerator flags / MACE device are
+configurable (`LammpsSamplingInput.lammps_args` / `device`, default
+KOKKOS-on-GPU) — which is what lets the middle tier run on a CPU CI runner.
 
 ## Run an AL loop
 

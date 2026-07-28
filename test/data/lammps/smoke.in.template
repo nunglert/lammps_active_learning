@@ -1,0 +1,34 @@
+# Minimal MACE-MLIAP smoke run: a handful of NVT steps, dumping every step so
+# the sampler has a short trajectory to segment. Mirrors the production example
+# template (pair_style mliap unified + a mace mliap model) but with run 5.
+variable    dt equal 0.002
+variable model_file index {{ model_file }}
+
+units       metal
+atom_style  atomic
+atom_modify map yes
+newton      on
+boundary    p p p
+
+read_data   {{ data_file }}
+
+pair_style  mliap unified ${model_file} 0
+pair_coeff  * * Co Cu H O
+
+mass        1       58.933
+mass        2       63.546
+mass        3       1.008
+mass        4       15.999
+
+velocity    all create 300 {{ seed }} dist gaussian rot yes mom yes sum yes
+
+thermo          1
+thermo_style    custom step temp etotal press
+
+dump    d_nvt   all custom 1 {{ dump_file }} id type xu yu zu vx vy vz
+
+fix     md_nvt  all nvt temp 300 300 $(100.0*dt)
+run     5
+unfix   md_nvt
+
+write_data {{ final_data_file }}

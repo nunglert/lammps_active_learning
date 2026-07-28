@@ -56,6 +56,12 @@ class LammpsSamplingInput(ScriptInput):
     bin_count: int
     seed: int
     lammps_config_name: str = "lammps.in"
+    # LAMMPS accelerator/package flags inserted between ``-in`` and ``-log``.
+    # Default is KOKKOS-on-GPU (production); pass a CPU variant (or "") to run
+    # a non-GPU build, e.g. in CI.
+    lammps_args: str = "-k on g 1 -sf kk -pk kokkos newton on neigh half"
+    # torch device for the MACE committee scoring ("cuda" or "cpu").
+    device: str = "cuda"
 
     def validate(self, root: Optional[Path] = None) -> None:
         """Validate configuration parameters.
@@ -79,6 +85,11 @@ class LammpsSamplingInput(ScriptInput):
         if self.bin_count <= 0:
             raise ScriptInputError(
                 f"bin_count must be positive, got {self.bin_count}"
+            )
+
+        if self.device not in ("cpu", "cuda"):
+            raise ScriptInputError(
+                f"device must be 'cpu' or 'cuda', got {self.device!r}"
             )
 
         if root is not None:

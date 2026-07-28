@@ -1,54 +1,51 @@
+"""Cluster-side LAMMPS committee-uncertainty sampling payload.
+
+Runs one LAMMPS MD trajectory driven by a MACE model, scores every frame's
+local force-uncertainty across the committee, and writes the most-uncertain
+frame of each trajectory segment to ``out/samples.xyz``.
+
+Shipped and executed on the cluster by
+:class:`lammps_al.run.sampler.LammpsSampler` -- it is not imported as a module
+in the normal flow (``main`` runs it from ``sys.argv``), but its functions are
+import-safe so they can be unit-tested. The heavy ``torch`` / ``mace`` imports
+are done lazily inside the two functions that need them, so the pure helpers
+(``parse_jinja_template``, ``aggregate_uncertainties``,
+``select_max_uncertainty_frames``) import with only ``ase`` + ``numpy`` +
+``jinja2`` present -- no MACE stack, no LAMMPS, no GPU.
+"""
+
 import logging
 import os
 import pathlib
 import subprocess
 import sys
 import warnings
-from copy import deepcopy
 from pathlib import Path
 from typing import Any, Optional
 
-import ase
+import ase.geometry
+import ase.io
 import jinja2
 import numpy as np
-import torch
-from mace.calculators.lammps_mliap_mace import LAMMPS_MLIAP_MACE
-from mace.calculators.mace import MACECalculator
-from mace.cli.convert_e3nn_cueq import run as run_e3nn_to_cueq
 
-from lammps_al.run.inputs import LammpsSamplingInput
+# ``LammpsSamplingInput`` (and thus ``remote_handler``) is imported lazily in
+# ``main`` so the pure helpers below import with only ase + numpy + jinja2.
 
-try:
-    import cuequivariance as cue
-    import cuequivariance_torch as cuet
-
-    CUET_AVAILABLE = True
-except ImportError:
-    CUET_AVAILABLE = False
+# Default LAMMPS accelerator flags: KOKKOS on one GPU (production default).
+# CPU runs (e.g. CI) override this via LammpsSamplingInput.lammps_args, e.g.
+# "" or "-k on t 2 -sf kk -pk kokkos newton on neigh half" for an OpenMP build.
+DEFAULT_LAMMPS_ARGS = "-k on g 1 -sf kk -pk kokkos newton on neigh half"
 
 
-# Load and validate input configuration
-calcpath = Path(sys.argv[1]).parent
-INPUTFILE = Path(sys.argv[1])
-input_config = LammpsSamplingInput.from_file(INPUTFILE)
-input_config.validate(calcpath)
+def _cuet_available() -> bool:
+    """Whether cuequivariance(_torch) is importable (enables cueq in MACE)."""
+    try:
+        import cuequivariance  # noqa: F401
+        import cuequivariance_torch  # noqa: F401
 
-outpath = calcpath / "out"
-os.makedirs(outpath, exist_ok=False)
-
-lammps_path = input_config.lammps_path
-template_file_name = input_config.template_file
-data_path = calcpath / input_config.data_file
-model_paths = [calcpath / p for p in input_config.model_files]
-
-config_path = outpath / input_config.lammps_config_name
-samples_file = outpath / "samples.xyz"
-full_traj_file = outpath / "traj+uncertainties.xyz"
-
-element_mapping = input_config.element_mapping
-cutoff_radius = input_config.cutoff_radius
-bin_count = input_config.bin_count
-seed = input_config.seed
+        return True
+    except ImportError:
+        return False
 
 
 def parse_jinja_template(
@@ -92,6 +89,12 @@ def create_lammps_mliap_model(
     Returns:
         If requested, path to the compiled model
     """
+    from copy import deepcopy
+
+    import torch
+    from mace.calculators.lammps_mliap_mace import LAMMPS_MLIAP_MACE
+    from mace.cli.convert_e3nn_cueq import run as run_e3nn_to_cueq
+
     if out_path is not None:
         compiled_path = out_path
     else:
@@ -126,6 +129,7 @@ def run_lammps_from_template(
     do_return_path: bool = False,
     trj_file_key: Any = "trj_file",
     logger: Optional[logging.Logger] = None,
+    lammps_args: str = DEFAULT_LAMMPS_ARGS,
     **kwargs,
 ) -> Optional[pathlib.Path]:
     """Run a LAMMPS MD simulation using an input file template
@@ -142,6 +146,9 @@ def run_lammps_from_template(
             to the trajectory file. Returns None if 'do_return_path' is True
             but the key is not found in the kwargs dictionary
         logger: Logger to write non-LAMMPS log output to
+        lammps_args: Command-line flags inserted between ``-in`` and ``-log``
+            (accelerator/package selection). Defaults to KOKKOS-on-GPU; pass a
+            CPU variant (or "") for a non-GPU build.
         **kwargs: Keyword arguments passed to the template parser
 
     Returns:
@@ -153,10 +160,13 @@ def run_lammps_from_template(
         template_file_name,
         **kwargs,
     )
+    command = (
+        f"{lmp_cmd} -in {input_file.resolve()} {lammps_args} "
+        f"-log {log_file.resolve()}"
+    )
     try:
         subprocess.run(
-            f"{lmp_cmd} -in {input_file.resolve()} -k on g 1 -sf kk -pk kokkos newton on neigh half "
-            f"-log {log_file.resolve()}",
+            command,
             check=True,
             shell=True,
             stderr=subprocess.PIPE,
@@ -208,9 +218,30 @@ def aggregate_uncertainties(
     return (mask * unc_mean[np.newaxis, :]).sum(axis=1) / mask.sum(axis=1)
 
 
+def select_max_uncertainty_frames(structs: list, bin_count: int) -> list:
+    """Pick the peak-uncertainty frame from each of ``bin_count`` segments.
+
+    Splits ``structs`` (which must each carry a per-atom ``uncertainties``
+    array and share a constant atom count) into ``bin_count`` equal contiguous
+    segments and returns, for each segment, the frame whose single most
+    uncertain atom is largest. ``len(structs)`` must be divisible by
+    ``bin_count`` (the caller trims the tail first).
+
+    This is the pure selection core of :func:`get_samples_from_dump`, split out
+    so the binning/argmax logic is unit-testable without MACE or LAMMPS.
+    """
+    num_atoms = np.array(structs).shape[1]
+    uncertainties = np.array([s.arrays["uncertainties"] for s in structs])
+    uncertainties = uncertainties.reshape((bin_count, -1, num_atoms))
+    segment_size = uncertainties.shape[1]
+    offsets = np.arange(0, bin_count * segment_size, segment_size)
+    indices = np.argmax(uncertainties.max(axis=2), axis=1) + offsets
+    return [structs[i] for i in indices]
+
+
 def get_samples_from_dump(
     trajectory_file: pathlib.Path,
-    model_files: list[pathlib.Path],
+    model_files: list,
     element_mapping: dict,
     cutoff_radius: int,
     bin_count: int,
@@ -218,29 +249,33 @@ def get_samples_from_dump(
     logger: logging.Logger,
     output_full_uncertainties_traj: bool = False,
     full_file: pathlib.Path = None,
+    device: str = "cuda",
 ) -> None:
-    """Sample from the given trajectory by dividing it into segments and sampling
-    the structure with the highest individual local uncertainty value out of each
-    segement.
+    """Sample from the given trajectory by dividing it into segments and
+    sampling the structure with the highest individual local uncertainty value
+    out of each segment.
 
     Args:
         trajectory_file: Path to lammps .dump output file to sample from
-        model_files: List of Paths to models to calculate committee uncertainties
-            with
+        model_files: List of Paths to models to calculate committee
+            uncertainties with
         element_mapping: Dict that maps the atom species number from the given
             trajectory file (as strings) to the corresponding element symbol
         cutoff_radius: cutoff radius (in Angstrom) for calculating the local
             uncertainties
-        bin_count: number of segments to divide the trajectory into - if the length
-            of the trajectory is not evenly divisible by this number, configurations
-            will be removed from the end of the trajectory until it is
+        bin_count: number of segments to divide the trajectory into - if the
+            length of the trajectory is not evenly divisible by this number,
+            configurations will be removed from the end of the trajectory until
+            it is
         samples_file: path to write the sampled structures to
         logger: logger
-        output_full_uncertainties_traj: determines whether to additionally output
-            the full trajectory with attached uncertainties
+        output_full_uncertainties_traj: determines whether to additionally
+            output the full trajectory with attached uncertainties
         full_file: if output_full_uncertainties_traj=True, the full trajectory
             with attached uncertainties is output to this path
+        device: torch device for the MACE committee ("cuda" or "cpu").
     """
+    from mace.calculators.mace import MACECalculator
 
     structs = ase.io.read(
         trajectory_file, format="lammps-dump-text", index=":"
@@ -249,9 +284,9 @@ def get_samples_from_dump(
     mod = len(structs) % bin_count
     if mod != 0:
         logger.warning(
-            f"Input trajectory size of {len(structs)} is not evenly divisible by "
-            f"{bin_count} segments., Cutting last {mod} structures from trajectory "
-            f"to ensure evenly sized segments."
+            f"Input trajectory size of {len(structs)} is not evenly divisible "
+            f"by {bin_count} segments., Cutting last {mod} structures from "
+            f"trajectory to ensure evenly sized segments."
         )
         structs = structs[:-mod]
 
@@ -264,9 +299,9 @@ def get_samples_from_dump(
         warnings.filterwarnings("ignore", category=UserWarning)
         model_calc = MACECalculator(
             model_paths=model_files,
-            device="cuda",
+            device=device,
             default_dtype="float32",
-            enable_cueq=CUET_AVAILABLE,
+            enable_cueq=_cuet_available(),
         )
 
     for atoms in structs:
@@ -287,47 +322,75 @@ def get_samples_from_dump(
     if output_full_uncertainties_traj and full_file is not None:
         ase.io.write(full_file, structs, format="extxyz")
 
-    num_atoms = np.array(structs).shape[1]
-    uncertainties = np.array([s.arrays["uncertainties"] for s in structs])
-    uncertainties = uncertainties.reshape((bin_count, -1, num_atoms))
-    segment_size = uncertainties.shape[1]
-    offsets = np.arange(0, bin_count * segment_size, segment_size)
-    indices = np.argmax(uncertainties.max(axis=2), axis=1) + offsets
-    max_structs = [structs[i] for i in indices]
+    max_structs = select_max_uncertainty_frames(structs, bin_count)
     ase.io.write(samples_file, max_structs, format="extxyz")
 
 
-mliap_path = create_lammps_mliap_model(
-    model_path=model_paths[0], do_return_path=True
-)
+def main(argv: Optional[list] = None) -> None:
+    """Cluster-side entry point: run one LAMMPS committee-sampling job.
 
-trajectory = run_lammps_from_template(
-    lmp_cmd=lammps_path,
-    log_file=outpath / "lmp.log",
-    input_file=config_path,
-    template_dir=calcpath,
-    template_file_name=template_file_name,
-    logger=logging.getLogger(),
-    model_file=mliap_path,
-    data_file=data_path,
-    seed=seed,
-    dump_file=outpath / "md_sampling.dump",
-    final_data_file=outpath / "surface_final.data",
-    do_return_path=True,
-    trj_file_key="dump_file",
-)
+    Reads the ``LammpsSamplingInput`` JSON named by ``argv[1]``, runs the MD,
+    selects candidates, and writes the ``is_finished.info`` success marker that
+    ``SingleScriptTask.finish_check`` polls on the host.
+    """
+    from lammps_al.run.inputs import LammpsSamplingInput
 
-get_samples_from_dump(
-    trajectory_file=trajectory,
-    model_files=model_paths,
-    element_mapping=element_mapping,
-    cutoff_radius=cutoff_radius,
-    bin_count=bin_count,
-    samples_file=samples_file,
-    output_full_uncertainties_traj=True,
-    full_file=full_traj_file,
-    logger=logging.getLogger(),
-)
+    argv = sys.argv if argv is None else argv
 
-# Success marker checked by SingleScriptTask.finish_check on the host.
-(calcpath / "is_finished.info").write_text("LAMMPS sampling finished")
+    inputfile = Path(argv[1])
+    calcpath = inputfile.parent
+    input_config = LammpsSamplingInput.from_file(inputfile)
+    input_config.validate(calcpath)
+
+    outpath = calcpath / "out"
+    os.makedirs(outpath, exist_ok=False)
+
+    lammps_path = input_config.lammps_path
+    template_file_name = input_config.template_file
+    data_path = calcpath / input_config.data_file
+    model_paths = [calcpath / p for p in input_config.model_files]
+
+    config_path = outpath / input_config.lammps_config_name
+    samples_file = outpath / "samples.xyz"
+    full_traj_file = outpath / "traj+uncertainties.xyz"
+
+    mliap_path = create_lammps_mliap_model(
+        model_path=model_paths[0], do_return_path=True
+    )
+
+    trajectory = run_lammps_from_template(
+        lmp_cmd=lammps_path,
+        log_file=outpath / "lmp.log",
+        input_file=config_path,
+        template_dir=calcpath,
+        template_file_name=template_file_name,
+        logger=logging.getLogger(),
+        lammps_args=input_config.lammps_args,
+        model_file=mliap_path,
+        data_file=data_path,
+        seed=input_config.seed,
+        dump_file=outpath / "md_sampling.dump",
+        final_data_file=outpath / "surface_final.data",
+        do_return_path=True,
+        trj_file_key="dump_file",
+    )
+
+    get_samples_from_dump(
+        trajectory_file=trajectory,
+        model_files=model_paths,
+        element_mapping=input_config.element_mapping,
+        cutoff_radius=input_config.cutoff_radius,
+        bin_count=input_config.bin_count,
+        samples_file=samples_file,
+        output_full_uncertainties_traj=True,
+        full_file=full_traj_file,
+        logger=logging.getLogger(),
+        device=input_config.device,
+    )
+
+    # Success marker checked by SingleScriptTask.finish_check on the host.
+    (calcpath / "is_finished.info").write_text("LAMMPS sampling finished")
+
+
+if __name__ == "__main__":
+    main()

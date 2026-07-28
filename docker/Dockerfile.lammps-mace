@@ -1,0 +1,61 @@
+# CPU MACE-enabled LAMMPS image for the `lammps-smoke` CI job.
+#
+# Builds LAMMPS from source with the ML-IAP *Python* coupling that the payload
+# uses (`pair_style mliap unified <model.pt> ...`), plus KOKKOS (OpenMP) so the
+# `-sf kk` accelerator flags work on CPU. `mace-torch` (and torch, CPU) are
+# pip-installed into the same interpreter LAMMPS links, because the mliap model
+# is a pickled MACE object loaded through LAMMPS's embedded Python at runtime.
+#
+# Build & push once (the install cost is paid here, not per-pipeline):
+#   docker build -f docker/Dockerfile.lammps-mace \
+#     -t registry.gitlab.tuwien.ac.at/<group>/lammps_active_learning/lammps-mace:cpu .
+#   docker push registry.gitlab.tuwien.ac.at/<group>/lammps_active_learning/lammps-mace:cpu
+#
+# NOTE: this recipe is the documented mliap-python + KOKKOS build, but the exact
+# LAMMPS_VERSION / flag set should be validated with one real build+run of the
+# `lammps` test tier before the CI job is flipped from manual to automatic.
+
+FROM python:3.11-slim
+
+ARG LAMMPS_VERSION=stable_2Aug2023_update3
+ARG MACE_VERSION=0.3.14
+
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential cmake git ca-certificates \
+        libopenmpi-dev openmpi-bin \
+    && rm -rf /var/lib/apt/lists/*
+
+# CPU torch + MACE + the tools the MLIAP-Python build needs (cython), in the
+# interpreter LAMMPS will embed.
+RUN pip install --no-cache-dir \
+        --extra-index-url https://download.pytorch.org/whl/cpu \
+        torch \
+    && pip install --no-cache-dir "mace-torch==${MACE_VERSION}" cython numpy
+
+# Build LAMMPS with ML-IAP (+ Python coupling) and KOKKOS/OpenMP.
+RUN git clone --depth 1 --branch ${LAMMPS_VERSION} \
+        https://github.com/lammps/lammps.git /opt/lammps
+WORKDIR /opt/lammps/build
+RUN cmake ../cmake \
+        -DCMAKE_BUILD_TYPE=Release \
+        -DBUILD_SHARED_LIBS=ON \
+        -DBUILD_MPI=OFF \
+        -DPKG_PYTHON=ON \
+        -DPKG_ML-IAP=ON \
+        -DPKG_ML-SNAP=ON \
+        -DMLIAP_ENABLE_PYTHON=ON \
+        -DPKG_KOKKOS=ON \
+        -DKokkos_ENABLE_OPENMP=ON \
+        -DKokkos_ARCH_NATIVE=ON \
+        -DPYTHON_EXECUTABLE=$(which python) \
+    && cmake --build . -j "$(nproc)" \
+    && cmake --install . \
+    && ln -sf /opt/lammps/build/lmp /usr/local/bin/lmp
+
+# Make the freshly built LAMMPS Python module importable (mliap unified imports
+# `lammps` / the mliappy bridge from here).
+RUN cd /opt/lammps/python && pip install --no-cache-dir .
+
+ENV OMP_NUM_THREADS=1
+WORKDIR /work

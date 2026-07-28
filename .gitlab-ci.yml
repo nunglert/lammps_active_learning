@@ -56,7 +56,10 @@ test:
     - pip install ".[all]"
     - python -c "import lammps_al; from lammps_al.run.sampler import LammpsSampler; print('install OK')"
   script:
-    - pytest -ra --junitxml=report.xml
+    # -m 'not lammps': the real-binary smoke test runs in lammps-smoke below,
+    # on the MACE-LAMMPS image. Everything else (unit + committee scoring) runs
+    # here and the lammps tier self-skips anyway, but excluding it is explicit.
+    - pytest -ra -m 'not lammps' --junitxml=report.xml
   artifacts:
     when: always
     reports:
@@ -65,3 +68,36 @@ test:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
     - if: '$CI_COMMIT_BRANCH'
+
+# Real end-to-end LAMMPS smoke test on the prebuilt MACE-LAMMPS image (see
+# docker/Dockerfile.lammps-mace). The image already ships lmp + mace-torch +
+# torch (CPU); here we add remote_handler (base, no mace extra) + this package
+# without reinstalling the heavy stack, then run only the `lammps` tier.
+#
+# Kept `when: manual` + `allow_failure: true` until the image has been built,
+# pushed to the registry, and validated with one real run. Once green, drop
+# both to make it a normal gate (and set `image:` to the pushed tag).
+lammps-smoke:
+  stage: test
+  image: registry.gitlab.tuwien.ac.at/e165-03-1_theoretische_materialchemie/madsen-s-research-group/lammps_active_learning/lammps-mace:cpu
+  allow_failure: true
+  before_script:
+    - git config --global
+        url."https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.tuwien.ac.at/".insteadOf
+        "ssh://git@gitlab.tuwien.ac.at/"
+    - pip install --no-cache-dir
+        "remote_handler @ git+ssh://git@gitlab.tuwien.ac.at/e165-03-1_theoretische_materialchemie/madsen-s-research-group/remote_handler.git@dev-NU"
+    - pip install --no-cache-dir . --no-deps
+    - lmp -h | head -1
+  script:
+    - pytest -ra -m lammps --junitxml=report-lammps.xml
+  artifacts:
+    when: always
+    reports:
+      junit: report-lammps.xml
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+      when: manual
+    - if: '$CI_COMMIT_BRANCH'
+      when: manual

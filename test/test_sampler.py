@@ -101,6 +101,25 @@ def test_lammps_create_stub_outputs(mock_remote_fs, tmp_path):
         assert atoms.info["max_uncertainty"] > 0
 
 
+def test_default_accelerator_is_gpu(mock_remote_fs, tmp_path):
+    """Defaults preserve the production KOKKOS-on-GPU behaviour."""
+    s = _sampler(mock_remote_fs, tmp_path)
+    assert s.lammps_args == "-k on g 1 -sf kk -pk kokkos newton on neigh half"
+    assert s.device == "cuda"
+
+
+def test_cpu_override_is_stored(mock_remote_fs, tmp_path):
+    """A CPU run overrides the accelerator flags and device."""
+    s = _sampler(
+        mock_remote_fs,
+        tmp_path,
+        lammps_args="-k on t 2 -sf kk -pk kokkos newton on neigh half",
+        device="cpu",
+    )
+    assert "t 2" in s.lammps_args
+    assert s.device == "cpu"
+
+
 def test_lammps_raises_on_unfinished(mock_remote_fs, tmp_path):
     """A job that leaves no is_finished marker aborts with WorkflowError."""
     from unittest.mock import MagicMock

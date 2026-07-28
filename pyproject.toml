@@ -61,4 +61,5 @@ addopts = "-ra"
 markers = [
     "local: runs with no cluster/producer; always runnable",
     "integration: needs a live cluster or producer packages",
+    "lammps: needs a MACE-enabled LAMMPS binary on PATH; self-skips otherwise",
 ]

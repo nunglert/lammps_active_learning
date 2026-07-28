@@ -68,6 +68,10 @@ class LammpsSampler(Sampler):
             ``lammps_sampling.py``.
         remote_savepath: Path on the remote machine for calculation files
         loop_time: Interval (seconds) to poll for job completion
+        lammps_args: LAMMPS accelerator/package flags for the ``lmp`` command
+            (inserted between ``-in`` and ``-log``). Defaults to KOKKOS-on-GPU;
+            pass a CPU variant (or "") for a non-GPU build.
+        device: torch device for the MACE committee scoring ("cuda" or "cpu").
         stub: Dry-run without a cluster; emit mock samples for testing
     """
 
@@ -83,6 +87,8 @@ class LammpsSampler(Sampler):
         sampling_script: Optional[os.PathLike] = None,
         remote_savepath: Optional[os.PathLike] = None,
         loop_time: float = 30,
+        lammps_args: str = "-k on g 1 -sf kk -pk kokkos newton on neigh half",
+        device: str = "cuda",
         stub: bool = False,
     ):
         super().__init__()
@@ -96,6 +102,8 @@ class LammpsSampler(Sampler):
         self.num_samples = num_samples
         self.uncertainty_cutoff_radius = uncertainty_cutoff_radius
         self.remote_lammps_executable_path = remote_lammps_executable_path
+        self.lammps_args = lammps_args
+        self.device = device
         self.remote_savepath = remote_savepath
         self.loop_time = loop_time
         self.stub = stub
@@ -131,6 +139,8 @@ class LammpsSampler(Sampler):
                 "cutoff_radius": self.uncertainty_cutoff_radius,
                 "bin_count": self.num_samples,
                 "seed": np.random.randint(1e6),
+                "lammps_args": self.lammps_args,
+                "device": self.device,
             }
 
             self.script_input_file = self.results_dir / "input_sample.json"
