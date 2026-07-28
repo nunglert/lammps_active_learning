@@ -11,13 +11,42 @@
 #      this project's token (add lammps_active_learning).
 #   2. The runner needs outbound network to gitlab.tuwien.ac.at AND github.com
 #      (the latter for the public mace-torch source).
+#   3. Enable this project's Container Registry (Settings -> General ->
+#      Visibility -> Container Registry) and run the `build-lammps-image` job
+#      once, so the `lammps-smoke` job has an image to pull. The registry path
+#      is taken from the predefined $CI_REGISTRY_IMAGE (never hardcode a
+#      registry hostname -- it is instance-specific).
 #
-# No custom image is built, so this needs no privileged mode and runs on any
-# untagged docker/kubernetes runner. python:3.13 (not -slim) ships git +
-# compilers needed to install the git-sourced dependencies.
+# The main `test` job builds no image (any docker/kubernetes runner works;
+# python:3.13 ships git + compilers for the git-sourced deps). The optional
+# `lammps-smoke` job runs on a prebuilt MACE-LAMMPS image built by
+# `build-lammps-image`.
 
 stages:
+  - build
   - test
+
+# Build & push the CPU MACE-LAMMPS image (docker/Dockerfile.lammps-mace) to this
+# project's registry with kaniko (no privileged docker needed on k8s runners).
+# Manual: the build is heavy (LAMMPS from source + torch/mace) -- run it once to
+# populate the registry, and again whenever the Dockerfile changes. Building
+# locally and `docker push`ing to $CI_REGISTRY_IMAGE/lammps-mace:cpu works too
+# (and is easier to iterate on while validating the Dockerfile).
+build-lammps-image:
+  stage: build
+  image:
+    name: gcr.io/kaniko-project/executor:v1.23.2-debug
+    entrypoint: [""]
+  script:
+    - mkdir -p /kaniko/.docker
+    - echo "{\"auths\":{\"${CI_REGISTRY}\":{\"auth\":\"$(printf "%s:%s" "${CI_REGISTRY_USER}" "${CI_REGISTRY_PASSWORD}" | base64 | tr -d '\n')\"}}}" > /kaniko/.docker/config.json
+    - /kaniko/executor
+        --context "${CI_PROJECT_DIR}"
+        --dockerfile "${CI_PROJECT_DIR}/docker/Dockerfile.lammps-mace"
+        --destination "${CI_REGISTRY_IMAGE}/lammps-mace:cpu"
+  rules:
+    - when: manual
+  allow_failure: true
 
 variables:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
@@ -74,12 +103,14 @@ test:
 # torch (CPU); here we add remote_handler (base, no mace extra) + this package
 # without reinstalling the heavy stack, then run only the `lammps` tier.
 #
-# Kept `when: manual` + `allow_failure: true` until the image has been built,
-# pushed to the registry, and validated with one real run. Once green, drop
-# both to make it a normal gate (and set `image:` to the pushed tag).
+# Requires `build-lammps-image` to have populated the registry first (the image
+# is pulled from $CI_REGISTRY_IMAGE, so the hostname is always correct for this
+# instance). Kept `when: manual` + `allow_failure: true` until the image has
+# been built and validated with one real run; once green, drop both to make it a
+# normal gate.
 lammps-smoke:
   stage: test
-  image: registry.gitlab.tuwien.ac.at/e165-03-1_theoretische_materialchemie/madsen-s-research-group/lammps_active_learning/lammps-mace:cpu
+  image: ${CI_REGISTRY_IMAGE}/lammps-mace:cpu
   allow_failure: true
   before_script:
     - git config --global
