@@ -27,7 +27,15 @@
 
 FROM python:3.11-slim
 
-ARG LAMMPS_VERSION=stable_2Aug2023_update3
+# LAMMPS must be the MACE-matched build: mace-torch's LAMMPS forward calls
+# MLIAP message-passing exchange methods (data.forward_exchange /
+# reverse_exchange) that only exist in the ACEsuit LAMMPS fork (and recent
+# upstream). Stock upstream stable_2Aug2023 is too old -> AttributeError:
+# 'MLIAPDataPy' object has no attribute 'forward_exchange'. Override these ARGs
+# to match the exact source/commit of a known-good build (e.g. the group's
+# existing .../build-mliap/lmp) if this pairing doesn't match your mace-torch.
+ARG LAMMPS_REPO=https://github.com/ACEsuit/lammps.git
+ARG LAMMPS_BRANCH=mace
 ARG MACE_VERSION=0.3.14
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -44,8 +52,8 @@ RUN pip install --no-cache-dir \
     && pip install --no-cache-dir "mace-torch==${MACE_VERSION}" cython numpy
 
 # Build LAMMPS with ML-IAP (+ Python coupling) and KOKKOS/OpenMP.
-RUN git clone --depth 1 --branch ${LAMMPS_VERSION} \
-        https://github.com/lammps/lammps.git /opt/lammps
+RUN git clone --depth 1 --branch ${LAMMPS_BRANCH} \
+        ${LAMMPS_REPO} /opt/lammps
 WORKDIR /opt/lammps/build
 RUN cmake ../cmake \
         -DCMAKE_BUILD_TYPE=Release \
