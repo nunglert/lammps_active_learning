@@ -350,6 +350,12 @@ def main(argv: Optional[list] = None) -> None:
     input_config = LammpsSamplingInput.from_file(inputfile)
     input_config.validate(calcpath)
 
+    # The MACE LAMMPS-MLIAP interface defaults to GPU and raises on CPU tensors
+    # ("Set MACE_ALLOW_CPU=true ..."). When the run is CPU-bound, opt in so the
+    # lmp subprocess (which inherits this env) can compute on CPU.
+    if input_config.device == "cpu":
+        os.environ["MACE_ALLOW_CPU"] = "true"
+
     outpath = calcpath / "out"
     os.makedirs(outpath, exist_ok=False)
 
