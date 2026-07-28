@@ -1,0 +1,18 @@
+*.pyc
+__pycache__
+*.egg-info
+.pytest_cache
+.coverage
+coverage.xml
+build/
+dist/
+.vscode*
+.venv/
+venv/
+
+# Run outputs / local scratch
+calchome/
+experiments
+
+.claude
+CLAUDE.md

@@ -1,0 +1,67 @@
+# CI for lammps_active_learning.
+#
+# Installs the package with its private dependency and runs the tests. The
+# install IS the check: it exercises the real cross-host dependency pipeline
+#   * remote_handler  -> GitLab (same instance) via CI_JOB_TOKEN
+# remote_handler's [mace_freeze] extra pulls mace-torch from PUBLIC GitHub over
+# https, so (unlike jaxrens_active_learning) no GitHub token is needed here.
+#
+# One-time prerequisites:
+#   1. On `remote_handler`: Settings -> CI/CD -> Job token permissions -> allow
+#      this project's token (add lammps_active_learning).
+#   2. The runner needs outbound network to gitlab.tuwien.ac.at AND github.com
+#      (the latter for the public mace-torch source).
+#
+# No custom image is built, so this needs no privileged mode and runs on any
+# untagged docker/kubernetes runner. python:3.13 (not -slim) ships git +
+# compilers needed to install the git-sourced dependencies.
+
+stages:
+  - test
+
+variables:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  # Full history + tags so setuptools-scm can derive the version (a shallow
+  # clone with no tags would fall back to fallback_version = 0.0.0).
+  GIT_DEPTH: "0"
+  GIT_FETCH_EXTRA_FLAGS: --tags
+
+# Run on branch pushes, merge requests, and scheduled pipelines (a cron defined
+# in Build -> Pipeline schedules) -- without duplicate pipelines. Scheduled runs
+# are the safety net against silent API drift in remote_handler: nothing changed
+# here, but the producer package's dev branch may have moved.
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH && $CI_OPEN_MERGE_REQUESTS'
+      when: never
+    - if: '$CI_COMMIT_BRANCH'
+
+test:
+  stage: test
+  image: python:3.13
+  before_script:
+    # remote_handler is pinned as an SSH URL in pyproject (so humans with SSH
+    # keys -- dev machines, clusters -- install with zero config). CI has no SSH
+    # key, so it rewrites that SSH URL to authenticated HTTPS at clone time via
+    # CI_JOB_TOKEN.
+    - git config --global
+        url."https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.tuwien.ac.at/".insteadOf
+        "ssh://git@gitlab.tuwien.ac.at/"
+    - python -V
+    - pip install --upgrade pip
+    # Full install: remote_handler (GitLab) + its mace stack (public GitHub) +
+    # dev. Heavy (torch/mace), but the resolve is the cross-host check.
+    - pip install ".[all]"
+    - python -c "import lammps_al; from lammps_al.run.sampler import LammpsSampler; print('install OK')"
+  script:
+    - pytest -ra --junitxml=report.xml
+  artifacts:
+    when: always
+    reports:
+      junit: report.xml
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'

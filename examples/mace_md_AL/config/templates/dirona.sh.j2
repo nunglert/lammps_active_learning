@@ -1,0 +1,19 @@
+#!/bin/bash
+#SBATCH --job-name={{ jobname }}
+#SBATCH --ntasks={{ n_cores }} 
+#SBATCH --partition={{ partition }}
+{{ slurm_header_add }}
+
+module purge
+module load vasp/6.4.2_intel
+source /opt/intel/oneapi/setvars.sh --force
+ulimit -s unlimited
+
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate {{ conda_env }}
+
+export VASP_PP_PATH=$HOME/vasp_pp_6.4.2
+
+pwd; hostname; date
+
+{% include job_type_template %}

@@ -1,0 +1,64 @@
+# -*- coding: utf-8 -*-
+
+[build-system]
+requires = ["setuptools>=64", "setuptools_scm>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "lammps_active_learning"
+dynamic = ["version"]
+authors = [
+    { name = "Nico Unglert", email = "nico.unglert@tuwien.ac.at" }
+]
+description = "Composition root for LAMMPS active-learning projects"
+requires-python = ">=3.10"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Science/Research",
+    "Topic :: Scientific/Engineering :: Chemistry",
+    "Topic :: Scientific/Engineering :: Physics",
+    "Natural Language :: English"
+]
+dependencies = [
+    "ase",
+    "numpy",
+]
+readme = "README.md"
+
+[project.optional-dependencies]
+# Run side: the host-side sampler needs remote_handler; the cluster conda env
+# that runs the shipped payload additionally needs a MACE stack (mace-torch +
+# cuequivariance, via remote_handler's [mace_freeze] extra), torch, and a
+# LAMMPS build with the MLIAP/MACE interface. Installing this on the cluster
+# also brings lammps_al itself (for the LammpsSamplingInput schema).
+run = [
+    "remote_handler[dev,mace_freeze] @ git+ssh://git@gitlab.tuwien.ac.at/e165-03-1_theoretische_materialchemie/madsen-s-research-group/remote_handler.git@dev-NU",
+]
+dev = [
+    "pytest",
+    "pytest-cov",
+    "pre-commit",
+]
+all = [
+    "lammps_active_learning[dev,run]"
+]
+
+[tool.setuptools_scm]
+# Single source of truth for the version is the git tag (mirrors jaxrens_al).
+# No version file is written; the runtime reads it via importlib.metadata.
+# fallback_version keeps the build from erroring on a tagless / shallow clone
+# with no git metadata (e.g. an sdist, or a CI checkout without full history).
+fallback_version = "0.0.0"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["test"]
+addopts = "-ra"
+markers = [
+    "local: runs with no cluster/producer; always runnable",
+    "integration: needs a live cluster or producer packages",
+]

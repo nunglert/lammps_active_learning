@@ -1,0 +1,7 @@
+{
+    "remote_machine": "datalab",
+    "partition": "GPU-a100s",
+    "savepath": "/home/e12218283/datalab-repo/active_learning/remote_handler/outputs",
+    "conda_env": "bsc_base",
+    "template": "datalab.sh.j2"
+}

@@ -1,0 +1,23 @@
+# Print the task and run range
+echo This is task $SLURM_ARRAY_TASK_ID
+
+MAP=({{ map_indices | join(' ') }})
+
+# Get the mapped index for this SLURM array task
+MAPPED_INDEX=${MAP[$SLURM_ARRAY_TASK_ID]}
+
+PER_TASK={{per_task}}
+
+# Calculate the starting and ending values for this task
+START_NUM=$(( ($SLURM_ARRAY_TASK_ID - 1) * $PER_TASK + 1 ))
+END_NUM=$(( $SLURM_ARRAY_TASK_ID * $PER_TASK ))
+
+# Print the task and run range
+echo This is task $SLURM_ARRAY_TASK_ID, which will do runs $START_NUM to $END_NUM
+
+# Run the loop of runs for this task
+for (( run=$START_NUM; run<=END_NUM; run++ )); do
+  echo This is SLURM task $SLURM_ARRAY_TASK_ID, run number $run
+  run_id=$((run - 1))
+  python {{ python_script_path }} {{ calcdir }}/$run_id
+done

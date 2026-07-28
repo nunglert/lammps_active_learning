@@ -1,0 +1,27 @@
+{# templates/mace_config_l2.yaml.template #}
+name: {{ name }}
+seed: {{ seed }}
+train_file: {{ train_file }}
+valid_file: {{ valid_file }}
+config_type_weights: {'Default': 1.0}
+E0s: average
+model: ScaleShiftMACE
+hidden_irreps: 64x0e + 64x1o
+r_max: 5.0
+max_ell: 2
+batch_size: 16
+max_num_epochs: 1600
+stage_two: yes
+start_stage_two: 1200
+ema: yes
+ema_decay: 0.99
+amsgrad: yes
+patience: 50
+device: cuda
+default_dtype: float32
+restart_latest: yes
+enable_cueq: yes
+checkpoints_dir: {{ checkpoints_dir }}
+log_dir: {{ log_dir }}
+model_dir: {{ model_dir }}
+results_dir: {{ results_dir }}
