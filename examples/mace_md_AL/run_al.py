@@ -40,7 +40,7 @@ from pathlib import Path
 from remote_handler import configure_logging
 from remote_handler.core.cluster_handler import ClusterConfig
 from remote_handler.core.file_handler import RemoteFileSystem
-from remote_handler.workflows import StagedActiveLearningHandler
+from remote_handler.workflows import Stage, StagedActiveLearningHandler
 from remote_handler.workflows.evaluators import VASPEvaluator
 from remote_handler.workflows.trainers import MaceModelTrainer
 
@@ -161,26 +161,50 @@ mace_trainer = MaceModelTrainer(
 # ---------------------------------------------------------------------------
 # Active Learning Loop
 # ---------------------------------------------------------------------------
-# StagedActiveLearningHandler is the staged (stage-list) loop; its ``from_actors``
-# factory takes the classic three actors and mirrors ActiveLearningHandler's
-# arguments. (To thin the candidate pool with a QUESTS/uncertainty selector,
-# pass ``selector=...`` -- it inserts a selector stage between sampler and
-# evaluator; here the LammpsSampler already emits ``num_samples`` candidates.)
+# Build the stage list explicitly and instantiate StagedActiveLearningHandler
+# directly. Each stage consumes the previous stage's output; ``initial_input``
+# seeds its *first* iteration, and ``combine=True`` accumulates a stage's
+# outputs across iterations before the next stage consumes them.
 #
-# Seed from the existing committee + DFT database, then start at sampling and
-# run full sampling -> evaluation -> training cycles.
-al_handler = StagedActiveLearningHandler.from_actors(
-    lammps_sampler,
-    vasp_evaluator,
-    mace_trainer,
+# Chain (cyclic): sampler -> evaluator -> trainer -> (next iter) sampler.
+#   - sampler seed = the starting committee (it needs a model to run MD).
+#   - evaluator combines its outputs, so the trainer trains on the *whole*
+#     accumulated DFT set, not just the latest batch.
+#   - trainer seed = the starting DFT database; its outputs are ``.model``
+#     committees that drive the next round of MD.
+#
+# To thin the candidate pool, insert a Stage("selector", SelectorActor(...))
+# between sampler and evaluator; here the LammpsSampler already emits
+# ``num_samples`` candidates, so no selector stage is used.
+stages = [
+    Stage(
+        name="sampler",
+        actor=lammps_sampler,
+        combine=False,
+        output_extension="extxyz",
+        initial_input=model_files,
+    ),
+    Stage(
+        name="evaluator",
+        actor=vasp_evaluator,
+        combine=True,
+        output_extension="extxyz",
+    ),
+    Stage(
+        name="trainer",
+        actor=mace_trainer,
+        combine=False,
+        output_extension="model",
+        initial_input=db_file,
+    ),
+]
+
+al_handler = StagedActiveLearningHandler(
+    stages=stages,
     calchome=calchome / "calchome",
     num_iterations=5,
-    cycle_entry_point="sampler",
-    cycle_exit_point="training",
-    initial_evaluator_out=db_file,
-    initial_trainer_out=model_files,
-    combine_evaluator_outputs=True,
-    trainer_output_extension="model",
+    entry_stage="sampler",
+    exit_stage="trainer",
 )
 
 al_handler.run()
