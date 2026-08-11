@@ -175,10 +175,10 @@ class LammpsSampler(Sampler):
         os.makedirs(self.sample_dir, exist_ok=True)
         os.makedirs(self.results_dir, exist_ok=True)
 
-        if type(sampler_input) == Path:
-            self.model_files = [sampler_input]
-        else:
+        if isinstance(sampler_input, list):
             self.model_files = sampler_input
+        else:
+            self.model_files = [sampler_input]
 
         if "struct" in kwargs:
             self.data_path = kwargs["struct"]

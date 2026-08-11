@@ -112,7 +112,18 @@ def create_lammps_mliap_model(
         ),
         weights_only=False,
     )
-    head = "Default" if head is None else head
+
+    if hasattr(model, "heads"):
+        heads = model.heads
+    else:
+        heads = [None]
+
+    if len(heads) == 1:
+        print(f"Only one head found in the model: {heads[0]}. Skipping selection.")
+        head = heads[0]
+    else:
+        head = "Default" if head is None else head
+        
     if float32:
         model = model.float().to("cpu")
     else:
