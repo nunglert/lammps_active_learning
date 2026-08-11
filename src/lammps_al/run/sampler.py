@@ -156,7 +156,7 @@ class LammpsSampler(Sampler):
         }
 
     def update(
-        self, calcdir: Path, sampler_input: list[Path], **kwargs
+        self, calcdir: Path, sampler_input: Path | list[Path], **kwargs
     ) -> None:
         """Prepare (and stage) the LAMMPS run for this AL iteration.
 
@@ -175,7 +175,10 @@ class LammpsSampler(Sampler):
         os.makedirs(self.sample_dir, exist_ok=True)
         os.makedirs(self.results_dir, exist_ok=True)
 
-        self.model_files = sampler_input
+        if type(sampler_input) == Path:
+            sampler_input = [sampler_input]
+        else:
+            self.model_files = sampler_input
 
         if "struct" in kwargs:
             self.data_path = kwargs["struct"]
