@@ -176,7 +176,7 @@ class LammpsSampler(Sampler):
         os.makedirs(self.results_dir, exist_ok=True)
 
         if type(sampler_input) == Path:
-            sampler_input = [sampler_input]
+            self.model_files = [sampler_input]
         else:
             self.model_files = sampler_input
 
