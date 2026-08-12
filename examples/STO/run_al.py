@@ -188,9 +188,9 @@ class SamplerSchedule(active_learning_base.Schedule):
         super().__init__(num_iterations)
 
     def get_kwargs(self, iteration_idx):
-        self.temperature = self.temperature + self.temperature_step * iteration_idx
+        temperature = self.temperature + self.temperature_step * iteration_idx
         kwargs = {
-            "temperature": self.temperature,
+            "temperature": temperature,
             "timestep": 0.001,
             "n_run": 10000,
             "sampling_frequency": 1,

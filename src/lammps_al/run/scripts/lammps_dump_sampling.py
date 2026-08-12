@@ -126,6 +126,8 @@ def write_samples(structs: list, samples_file: Path, element_mapping: dict = Non
     """Write sampled structures to an extxyz file."""
     if element_mapping is not None:
         remapped_structs = remap_elements(structs, element_mapping)
+    else:
+        remapped_structs = structs
     ase.io.write(samples_file, remapped_structs, format="extxyz")
 
 
