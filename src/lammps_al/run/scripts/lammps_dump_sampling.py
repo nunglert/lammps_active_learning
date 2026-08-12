@@ -35,6 +35,7 @@ from lammps_al.run.scripts.lammps_sampling import (
     create_lammps_mliap_model,
     run_lammps_from_template,
 )
+from lammps_al.run.sampler import remap_elements
 
 logger = logging.getLogger(__name__)
 
@@ -121,9 +122,11 @@ def select_frequency_frames(structs: list, sampling_frequency: int) -> list:
     return structs[::sampling_frequency]
 
 
-def write_samples(structs: list, samples_file: Path) -> None:
+def write_samples(structs: list, samples_file: Path, element_mapping: dict = None) -> None:
     """Write sampled structures to an extxyz file."""
-    ase.io.write(samples_file, structs, format="extxyz")
+    if element_mapping is not None:
+        remapped_structs = remap_elements(structs, element_mapping)
+    ase.io.write(samples_file, remapped_structs, format="extxyz")
 
 
 def _load_input(input_file: Path) -> dict:
@@ -226,7 +229,7 @@ def main(argv: Optional[list] = None) -> None:
     sampled = select_frequency_frames(
         structs, int(config.get("sampling_frequency", 1))
     )
-    write_samples(sampled, samples_file)
+    write_samples(sampled, samples_file, element_mapping=config["element_mapping"])
 
     # Success marker checked by SingleScriptTask.finish_check on the host.
     (calcpath / "is_finished.info").write_text("LAMMPS sampling finished")
