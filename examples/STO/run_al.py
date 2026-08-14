@@ -1,5 +1,5 @@
 """
-Active learning workflow using SSPD with MACE models.
+Active learning workflow using LAMMPS with MACE models while doing pipelined sampling.
 
 This example demonstrates a three-step active learning loop:
   1. Initial sampling: TorchSimSampler runs NPT parallel tempering with the

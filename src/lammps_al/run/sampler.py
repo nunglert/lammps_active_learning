@@ -292,33 +292,20 @@ class LammpsSampler(Sampler):
                 f"Sampled configurations written to {output_path}"
             )
             return output_path
+        else:
+            # Run actual LAMMPS sampling
+            self.sampling_task.submit()
+            if not self.sampling_task.finish_check():
+                raise WorkflowError(
+                    "LAMMPS sampling did not finish successfully "
+                    "(no is_finished.info marker). Check the job logs in "
+                    f"{self.sampling_task.calcdir}."
+                )
+            self.sampling_task.collect_results()
 
-        # Run actual LAMMPS sampling
-        self.sampling_task.submit()
-        if not self.sampling_task.finish_check():
-            raise WorkflowError(
-                "LAMMPS sampling did not finish successfully "
-                "(no is_finished.info marker). Check the job logs in "
-                f"{self.sampling_task.calcdir}."
-            )
-        self.sampling_task.collect_results()
-
-        results_path = Path(self.sampling_task.local_savepath) / "out"
-
-        # Read the full trajectory the payload wrote and fix up the element
-        # symbols (the dump only stores atom-type indices).
-        traj_paths = sorted(results_path.glob("md_sampling.dump"))
-        frames: list[Atoms] = []
-        for tp in traj_paths:
-            frames.extend(
-                ase.io.read(str(tp), format="lammps-dump-text", index=":")
-            )
-        remap_elements(frames, self.element_mapping)
-
-        # Selection is handled by a dedicated SelectorActor stage in the
-        # StagedActiveLearningHandler, so the sampler just emits the frames.
-        output_path = results_path / "samples.xyz"
-        ase.io.write(output_path, frames)
+            output_path = (
+                    Path(self.sampling_task.local_savepath) / "out/samples.xyz"
+                )
 
         logger.info(f"Sampled configurations written to {output_path}")
         return output_path
