@@ -1,0 +1,35 @@
+variable    dt equal {{ timestep }}
+variable model_file index {{ model_file }}
+
+units       metal
+atom_style  atomic
+atom_modify map yes
+newton      on
+boundary    p p p
+
+read_data   {{ data_file }}
+
+
+pair_style  mliap unified ${model_file} 0
+pair_coeff  * * O Sr Ti
+
+
+velocity    all create {{ temperature }} {{ seed }} dist gaussian rot yes mom yes sum yes
+
+thermo          100
+thermo_style    custom step temp etotal press
+
+dump    d_nvt   all custom 1 {{ dump_file }} id type xu yu zu vx vy vz
+
+#########################################################
+#Equilibrate everything at room temperature        
+#########################################################
+
+fix     md_nvt  all nvt temp {{ temperature }} {{ temperature }} $(100.0*dt)
+
+run     {{ n_run }}
+
+unfix   md_nvt
+
+
+write_data {{ final_data_file }}

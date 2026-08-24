@@ -5,6 +5,7 @@ stub-mode tests run with NO cluster, SSH, or LAMMPS -- only remote_handler +
 ase + numpy on the host.
 """
 
+import json
 from pathlib import Path
 
 import pytest
@@ -48,6 +49,107 @@ def test_lammps_sampler_is_a_sampler(mock_remote_fs, tmp_path):
     """LammpsSampler implements remote_handler's Sampler interface."""
     s = _sampler(mock_remote_fs, tmp_path)
     assert isinstance(s, Sampler)
+
+
+def test_default_settings_num_samples_maps_to_bin_count(
+    mock_remote_fs, mock_model_files, tmp_path
+):
+    """num_samples keeps its previous meaning: trajectory bin_count."""
+    s = _sampler(mock_remote_fs, tmp_path, num_samples=7)
+    s.model_files = mock_model_files
+    settings = s._load_default_settings()
+    assert settings["bin_count"] == 7
+    # sampling_frequency is a distinct flag, not derived from num_samples
+    assert settings["sampling_frequency"] is None
+
+
+def test_default_settings_include_legacy_keys(
+    mock_remote_fs, mock_model_files, tmp_path
+):
+    """The legacy uncertainty payload needs element_mapping/cutoff_radius."""
+    s = _sampler(
+        mock_remote_fs,
+        tmp_path,
+        element_mapping={1: "Cu", 2: "Co"},
+        uncertainty_cutoff_radius=4.2,
+    )
+    s.model_files = mock_model_files
+    settings = s._load_default_settings()
+    assert settings["element_mapping"] == {1: "Cu", 2: "Co"}
+    assert settings["cutoff_radius"] == 4.2
+
+
+def test_default_settings_sampling_frequency_independent(
+    mock_remote_fs, mock_model_files, tmp_path
+):
+    """sampling_frequency is its own flag, independent of num_samples."""
+    s = _sampler(
+        mock_remote_fs, tmp_path, sampling_frequency=25, num_samples=None
+    )
+    s.model_files = mock_model_files
+    settings = s._load_default_settings()
+    assert settings["sampling_frequency"] == 25
+    assert settings["bin_count"] is None
+
+
+def _patch_single_script_task(monkeypatch):
+    """Replace ``SingleScriptTask`` with a recording stub.
+
+    ``update()`` builds and immediately uses the task to write its input JSON;
+    this stub captures the constructor kwargs (incl. ``input_file``) and
+    no-ops the file transfers, so the merge logic runs for real with no cluster.
+    """
+    import lammps_al.run.sampler as sampler_mod
+
+    created = {}
+
+    class _StubTask:
+        def __init__(self, **kwargs):
+            created.update(kwargs)
+            self.local_savepath = kwargs["local_savepath"]
+            self.input_file = kwargs["input_file"]
+
+        def allocate_data(self):
+            pass
+
+        def copy_file(self, *a, **k):
+            pass
+
+    monkeypatch.setattr(sampler_mod, "SingleScriptTask", _StubTask)
+    return created
+
+
+def test_update_warns_and_prefers_num_samples_when_both_specified(
+    mock_remote_fs, mock_model_files, tmp_path, monkeypatch, caplog
+):
+    """Both num_samples and sampling_frequency -> warn, num_samples wins."""
+    s = _sampler(mock_remote_fs, tmp_path, num_samples=5, stub=False)
+    created = _patch_single_script_task(monkeypatch)
+
+    with caplog.at_level("WARNING"):
+        s.update(tmp_path / "calcdir", mock_model_files, sampling_frequency=2)
+
+    assert any("Both num_samples" in r.message for r in caplog.records)
+    script_input = json.loads(Path(created["input_file"]).read_text())
+    assert script_input["bin_count"] == 5
+    assert "sampling_frequency" not in script_input
+
+
+def test_update_merges_schedule_kwargs_into_script_input(
+    mock_remote_fs, mock_model_files, tmp_path, monkeypatch
+):
+    """Schedule kwargs are merged into the payload input JSON verbatim."""
+    s = _sampler(mock_remote_fs, tmp_path, num_samples=None, stub=False)
+    created = _patch_single_script_task(monkeypatch)
+
+    s.update(tmp_path / "calcdir", mock_model_files, temperature=1000, n_run=500)
+
+    script_input = json.loads(Path(created["input_file"]).read_text())
+    assert script_input["temperature"] == 1000
+    assert script_input["n_run"] == 500
+    # sampling_frequency not set anywhere -> no conflict, stays null
+    assert script_input.get("sampling_frequency") is None
+    assert script_input["bin_count"] is None
 
 
 def test_init_lammps_sampler(mock_remote_fs, tmp_path):

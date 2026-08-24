@@ -37,6 +37,7 @@ from typing import Optional
 import ase.io
 import numpy as np
 from ase import Atoms
+from remote_handler.core.cluster_handler import ClusterConfig
 from remote_handler.core.file_handler import FileSystemHandlerBase
 from remote_handler.core.tasks import SingleScriptTask
 from remote_handler.exceptions import WorkflowError
@@ -45,6 +46,22 @@ from remote_handler.workflows.active_learning_base import Sampler
 from lammps_al.run.scripts import script_dir
 
 logger = logging.getLogger(__name__)
+
+
+def remap_elements(
+    structs: list, element_mapping: Optional[dict] = None
+) -> list:
+    """Convert LAMMPS atom-type indices to element symbols, in place.
+
+    """
+    if not element_mapping:
+        return structs
+    for atoms in structs:
+        for atom in atoms:
+            symbol = element_mapping.get(str(atom.number))
+            if symbol is not None:
+                atom.symbol = symbol
+    return structs
 
 
 class LammpsSampler(Sampler):
@@ -83,10 +100,10 @@ class LammpsSampler(Sampler):
         remote_fs: FileSystemHandlerBase,
         template_path: os.PathLike,
         data_path: os.PathLike,
-        element_mapping: dict,
-        num_samples: int,
-        uncertainty_cutoff_radius: float,
-        remote_lammps_executable_path: os.PathLike,
+        element_mapping: Optional[dict] = None,
+        num_samples: Optional[int] = None,
+        uncertainty_cutoff_radius: Optional[float] = None,
+        remote_lammps_executable_path: os.PathLike = "lmp",
         sampling_script: Optional[os.PathLike] = None,
         remote_savepath: Optional[os.PathLike] = None,
         loop_time: float = 30,
@@ -94,6 +111,8 @@ class LammpsSampler(Sampler):
         device: str = "cuda",
         enable_cueq: bool = True,
         stub: bool = False,
+        cluster_config: Optional[ClusterConfig] = None,
+        sampling_frequency: Optional[int] = None,
     ):
         super().__init__()
         if sampling_script is None:
@@ -104,6 +123,7 @@ class LammpsSampler(Sampler):
         self.data_path = data_path
         self.element_mapping = element_mapping
         self.num_samples = num_samples
+        self.sampling_frequency = sampling_frequency
         self.uncertainty_cutoff_radius = uncertainty_cutoff_radius
         self.remote_lammps_executable_path = remote_lammps_executable_path
         self.lammps_args = lammps_args
@@ -111,69 +131,110 @@ class LammpsSampler(Sampler):
         self.enable_cueq = enable_cueq
         self.remote_savepath = remote_savepath
         self.loop_time = loop_time
+        self.cluster_config = cluster_config
         self.stub = stub
 
+    def _load_default_settings(self) -> dict:
+        """Default script-input settings. Schedule ``**kwargs`` override these
+        in :meth:`update`
+
+        """
+        return {
+            "lammps_path": str(Path(self.remote_lammps_executable_path)),
+            "template_file": Path(self.template_path).name,
+            "data_file": Path(self.data_path).name,
+            "model_files": [Path(m).name for m in self.model_files],
+            "lammps_config_name": "lammps.in",
+            "seed": int(np.random.randint(1e6)),
+            "lammps_args": self.lammps_args,
+            "device": self.device,
+            "enable_cueq": self.enable_cueq,
+            "bin_count": self.num_samples,
+            "cutoff_radius": self.uncertainty_cutoff_radius,
+            "element_mapping": self.element_mapping,
+            "sampling_frequency": self.sampling_frequency,
+        }
+
     def update(
-        self, calcdir: Path, sampler_input: list[Path], **kwargs
+        self, calcdir: Path, sampler_input: Path | list[Path], **kwargs
     ) -> None:
         """Prepare (and stage) the LAMMPS run for this AL iteration.
+
+        Schedule ``**kwargs`` are merged into the payload's input JSON,
+        overriding the defaults. Keys such as
+        ``temperature``/``timestep``/``n_run`` are forwarded verbatim so the
+        payload can fill the LAMMPS template with them.
 
         Args:
             calcdir: Directory for this AL iteration
             sampler_input: List of model file paths (the committee)
-            **kwargs: Additional parameters (unused)
+            **kwargs: Schedule parameters merged into the sampling input
         """
         self.sample_dir = calcdir / "sample"
         self.results_dir = self.sample_dir / "results"
         os.makedirs(self.sample_dir, exist_ok=True)
         os.makedirs(self.results_dir, exist_ok=True)
 
-        self.model_files = sampler_input
+        if isinstance(sampler_input, list):
+            self.model_files = sampler_input
+        else:
+            self.model_files = [sampler_input]
 
-        # In stub mode, we don't need to create the task
-        if not self.stub:
-            script_input = {
-                "lammps_path": Path(
-                    self.remote_lammps_executable_path
-                ).as_posix(),
-                "template_file": Path(self.template_path).name,
-                "data_file": Path(self.data_path).name,
-                "model_files": [p.name for p in self.model_files],
-                "lammps_config_name": "lammps.in",
-                "element_mapping": self.element_mapping,
-                "cutoff_radius": self.uncertainty_cutoff_radius,
-                "bin_count": self.num_samples,
-                "seed": np.random.randint(1e6),
-                "lammps_args": self.lammps_args,
-                "device": self.device,
-                "enable_cueq": self.enable_cueq,
-            }
+        if "struct" in kwargs:
+            self.data_path = kwargs["struct"]
 
-            self.script_input_file = self.results_dir / "input_sample.json"
-            with open(self.script_input_file, "w") as f:
-                f.write(json.dumps(script_input, indent=2))
+        # In stub mode we don't stage a remote task.
+        if self.stub:
+            return
 
-            self.sampling_task = SingleScriptTask(
-                local_savepath=self.results_dir,
-                input_file=self.script_input_file,
-                remote_fs=self.remote_fs,
-                script_file=self.sampling_script,
-                remote_savepath=self.remote_savepath,
-                jobfile_name="run_sample.sh",
-                jobname="sample",
-                logfile="sample.log",
-                n_processors=1,
-                loop_time=self.loop_time,
-                collect_only=False,
+        script_input = self._load_default_settings()
+        for key in kwargs.keys():
+            script_input[key] = kwargs[key]
+        for key in list(script_input.keys()):
+            if isinstance(script_input[key], Path):
+                script_input[key] = str(script_input[key].name)
+
+        # num_samples (bin_count) takes precedence over sampling_frequency, as
+        # in the previous behaviour. Warn so the user knows which one won.
+        if (
+            script_input.get("bin_count") is not None
+            and script_input.get("sampling_frequency") is not None
+        ):
+            logger.warning(
+                "Both num_samples (%s) and sampling_frequency (%s) were "
+                "specified; using num_samples (previous behavior) and "
+                "ignoring sampling_frequency.",
+                script_input["bin_count"],
+                script_input["sampling_frequency"],
             )
+            script_input.pop("sampling_frequency", None)
 
-            self.sampling_task.allocate_data()
+        self.script_input_file = self.results_dir / "input_sample.json"
+        with open(self.script_input_file, "w") as f:
+            f.write(json.dumps(script_input, indent=2))
 
-            # Copy required files to remote
-            self.sampling_task.copy_file(self.template_path)
-            self.sampling_task.copy_file(self.data_path)
-            for p in self.model_files:
-                self.sampling_task.copy_file(p)
+        self.sampling_task = SingleScriptTask(
+            local_savepath=self.results_dir,
+            input_file=self.script_input_file,
+            cluster_config=self.cluster_config,
+            remote_fs=self.remote_fs,
+            script_file=self.sampling_script,
+            remote_savepath=self.remote_savepath,
+            jobfile_name="run_sample.sh",
+            jobname="sample",
+            logfile="sample.log",
+            n_processors=1,
+            loop_time=self.loop_time,
+            collect_only=False,
+        )
+
+        self.sampling_task.allocate_data()
+
+        # Copy required files to remote
+        self.sampling_task.copy_file(self.template_path)
+        self.sampling_task.copy_file(self.data_path)
+        for p in self.model_files:
+            self.sampling_task.copy_file(p)
 
     def _create_stub_outputs(self, num_samples: int = None) -> list[Atoms]:
         """Create mock LAMMPS sampling outputs for testing.
@@ -224,12 +285,13 @@ class LammpsSampler(Sampler):
             # In stub mode, create mock outputs directly
             logger.info("Running in stub mode - creating mock LAMMPS samples")
             sampled_configs = self._create_stub_outputs()
-
-            # Write to expected output location
-            output_dir = self.results_dir / "out"
-            os.makedirs(output_dir, exist_ok=True)
-            output_path = output_dir / "samples.xyz"
+            output_path = self.results_dir / "out" / "samples.xyz"
+            os.makedirs(output_path.parent, exist_ok=True)
             ase.io.write(output_path, sampled_configs)
+            logger.info(
+                f"Sampled configurations written to {output_path}"
+            )
+            return output_path
         else:
             # Run actual LAMMPS sampling
             self.sampling_task.submit()
@@ -240,9 +302,10 @@ class LammpsSampler(Sampler):
                     f"{self.sampling_task.calcdir}."
                 )
             self.sampling_task.collect_results()
+
             output_path = (
-                Path(self.sampling_task.local_savepath) / "out/samples.xyz"
-            )
+                    Path(self.sampling_task.local_savepath) / "out/samples.xyz"
+                )
 
         logger.info(f"Sampled configurations written to {output_path}")
         return output_path
