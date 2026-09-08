@@ -32,6 +32,25 @@ implementing `remote_handler`'s `Sampler` interface.
   from a non-editable install. It runs in the remote conda env (needs a MACE
   stack + a LAMMPS build with the MLIAP/MACE interface), not on the host.
 
+- `lammps_al.embedding.sampler` — `AmorphousEmbeddingSampler`, a second
+  native `remote_handler.Sampler`. Per AL iteration it extracts regions of
+  interest (ROIs) from an uncertainty-tagged trajectory, carves/orients/
+  cleans up an amorphous-matrix box around each (optionally oriented to a
+  detected surface/interface normal via OVITO), and anneals the mobile shell
+  around a frozen ROI core with a multi-stage LAMMPS deck. Two remote stages
+  (`lammps_al.embedding.scripts.extract`/`embedding_anneal`), each its own
+  `SingleScriptTask`, potentially on different machines/envs. Needs the
+  `[run]` extra; `topology_mode` in `{"surface", "interface"}` additionally
+  needs the `[embedding]` extra (`ovito`) on the extraction machine. Supports
+  `stub=True` for cluster-free dry runs.
+- `lammps_al.embedding.inputs` — `MatrixEmbeddingInput`/`EmbeddingAnnealInput`,
+  the JSON contracts for the two embedding payloads.
+- `lammps_al.embedding.scripts.{extract,embedding_anneal}.py` — the
+  cluster-side payloads; `lammps_al.embedding.scripts.script_dir()` locates
+  them from a non-editable install. `cleanup.py`/`geometry.py`/
+  `surface_mesh.py` hold the importable ROI-clustering/box-carving/
+  normal-detection helpers `extract.py` builds on.
+
 ## Uncertainty-driven sampling
 
 The sampler is a MACE **committee** driver: it runs one MD trajectory, evaluates
@@ -94,6 +113,14 @@ KOKKOS-on-GPU) — which is what lets the middle tier run on a CPU CI runner.
 `examples/mace_md_AL/` is a runnable Cu/Co surface reference (its own cluster
 `config/`, committee `inputs/models/`, and `run_al.py`). It bundles hard-coded
 paths from a prior user — adapt them before running. Start with `stub=True`.
+
+`examples/amorphous_embedding_AL/` has two runnable `AmorphousEmbeddingSampler`
+references driving a single sampling step directly against the sampler (not a
+full AL loop): `ame1` (Cu/H2O interface, `topology_mode="interface"`,
+two-stage anneal) and `ame2` (bulk Si/SiO2, `topology_mode="bulk"`,
+single-stage anneal), both driven by a GRACE foundation-model potential. Each
+bundles its own `inputs.zip`/`results.zip` and hard-coded paths from a prior
+user (conda/LAMMPS/model paths) — adapt `run_remote.py` before running.
 
 ## Conventions
 

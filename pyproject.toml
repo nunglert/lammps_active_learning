@@ -36,13 +36,21 @@ readme = "README.md"
 run = [
     "remote_handler[dev,mace_freeze] @ git+ssh://git@gitlab.tuwien.ac.at/e165-03-1_theoretische_materialchemie/madsen-s-research-group/remote_handler.git@dev-NU",
 ]
+# OVITO, for interface/surface-normal detection in the amorphous-matrix
+# embedding payload (lammps_al.embedding.scripts.surface_mesh). Only needed
+# on the remote env running scripts/extract.py with topology_mode in
+# {"surface", "interface"}; "bulk" mode needs no OVITO, and the fallback
+# species-COM heuristic is used if this extra is absent.
+embedding = [
+    "ovito"
+]
 dev = [
     "pytest",
     "pytest-cov",
     "pre-commit",
 ]
 all = [
-    "lammps_active_learning[dev,run]"
+    "lammps_active_learning[dev,run,embedding]"
 ]
 
 [tool.setuptools_scm]
@@ -54,6 +62,13 @@ fallback_version = "0.0.0"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# Ship the amorphous-embedding sampler's default anneal deck template inside
+# the installed package; without this it is missing from a real
+# (non-editable) install (editable installs mask this by pointing back at
+# src/).
+[tool.setuptools.package-data]
+lammps_al = ["embedding/scripts/templates/*.j2"]
 
 [tool.pytest.ini_options]
 testpaths = ["test"]

@@ -52,8 +52,14 @@ RUN pip install --no-cache-dir \
     && pip install --no-cache-dir "mace-torch==${MACE_VERSION}" cython numpy
 
 # Build LAMMPS with ML-IAP (+ Python coupling) and KOKKOS/OpenMP.
-RUN git clone --depth 1 --branch ${LAMMPS_BRANCH} \
-        ${LAMMPS_REPO} /opt/lammps
+# Record the exact source in the image so a running job can prove which build it
+# is (cat /opt/lammps-build-info.txt) -- mutable :cpu tags make this essential.
+RUN git clone --depth 1 --branch ${LAMMPS_BRANCH} ${LAMMPS_REPO} /opt/lammps \
+    && printf 'repo=%s\nbranch=%s\ncommit=%s\n' \
+        "${LAMMPS_REPO}" "${LAMMPS_BRANCH}" \
+        "$(git -C /opt/lammps rev-parse HEAD)" \
+        > /opt/lammps-build-info.txt \
+    && cat /opt/lammps-build-info.txt
 WORKDIR /opt/lammps/build
 RUN cmake ../cmake \
         -DCMAKE_BUILD_TYPE=Release \

@@ -1,0 +1,111 @@
+echo        log
+
+units       metal
+atom_style  atomic
+atom_modify map yes
+newton      on
+boundary    p p p
+
+read_data   {{ data_file }}
+
+pair_style  {{ pair_style }}
+pair_coeff  * * {{ pair_coeff_path }} {{ species | join(' ') }}
+
+{{ mass_lines }}
+
+timestep    {{ timestep }}
+
+{% for st in stages %}
+group       phase{{ st.index }}  type {{ st.type_list }}
+{% endfor %}
+
+dump    d_nvt   all custom {{ dump_every }} {{ dump_file }} id type xs ys zs vx vy vz
+dump_modify d_nvt sort id
+
+region fixSphere sphere {{ roi_x }} {{ roi_y }} {{ roi_z }} {{ cutoff }}
+group fixed region fixSphere
+
+# Repulsive buffer just inside the frozen core: without it, nothing stops
+# the annealed shell from diffusing into (or through) fixSphere -- the pair
+# potential's own short-range repulsion is not a reliable safeguard this
+# close to a rigid, non-relaxing boundary. Deliberately one shared region
+# for the whole `moving` group, not per-phase: unlike the z-wall further
+# down (which really does make sense to tune per stage), this protects the
+# frozen core itself and should stay uniformly active for every mobile
+# atom regardless of species -- trusting the pair potential's own
+# short-range repulsion to exclude a dense phase on its own, instead of an
+# explicit wall, isn't a risk worth taking this close to a rigid,
+# non-relaxing boundary.
+region repSphere sphere {{ roi_x }} {{ roi_y }} {{ roi_z }} {{ roi_repel_radius }} side out
+
+{% for st in stages %}
+group phase{{ st.index }}_move subtract phase{{ st.index }} fixed
+{% endfor %}
+group moving union {% for st in stages %}phase{{ st.index }}_move {% endfor %}
+
+fix freeze1 fixed setforce 0.0 0.0 0.0
+
+velocity    phase0_move create {{ stages[0].temp_start }} {{ seed }} dist gaussian rot yes mom yes sum yes
+
+thermo      {{ dump_every }}
+
+run 0
+
+# Created once, here -- deliberately outside the per-stage loop below and
+# never unfixed, so it stays active for the whole rest of the run,
+# whichever stage is currently being annealed.
+fix repel moving wall/region repSphere harmonic {{ roi_repel_epsilon }} 0.0 {{ roi_repel_wall_cutoff }}
+
+{% for st in stages %}
+{% for other in stages if other.index != st.index %}
+fix freeze_{{ other.index }}_during_{{ st.index }} phase{{ other.index }} setforce 0.0 0.0 0.0
+{% endfor %}
+
+velocity    phase{{ st.index }}_move set 0 0 0
+velocity    phase{{ st.index }}_move create {{ st.temp_start }} {{ seed }} dist gaussian rot yes mom yes sum yes
+
+{% if st.pressure_z is none and st.z_wall_epsilon > 0 %}
+# z isn't barostatted in this stage, so nothing else stops phase{{ st.index }}_move
+# drifting into vacuum/headspace -- pin it to its own extent at stage start
+# (+/- margin). Skipped whenever pressure_z is set: a static wall would
+# fight that stage's own box rescaling in z. Margin/epsilon/cutoff are this
+# stage's own values (falling back to the deck-wide default when the stage
+# doesn't override them) -- different stages anneal different species that
+# may reasonably want a differently-tuned (or disabled) wall. Unlike the
+# roi_repel wall above (created once, permanent for the whole run), this
+# one is created fresh and torn down (`unfix`, below) within THIS stage's
+# own block -- it exists only while phase{{ st.index }}_move's own segments
+# are running, not for the rest of the deck.
+compute maxZ{{ st.index }} phase{{ st.index }}_move reduce max z
+compute minZ{{ st.index }} phase{{ st.index }}_move reduce min z
+variable zmax{{ st.index }} equal "c_maxZ{{ st.index }}+{{ st.z_wall_margin }}"
+variable zmin{{ st.index }} equal "c_minZ{{ st.index }}-{{ st.z_wall_margin }}"
+# A freshly defined compute must be initialized by a run before an
+# equal-style variable referencing it can be dereferenced (LAMMPS: "Variable
+# formula compute cannot be invoked before initialization by a run") -- this
+# run 0 does nothing but trigger that setup for maxZ{{ st.index }}/minZ{{ st.index }}.
+run 0
+fix zwall_hi_{{ st.index }} phase{{ st.index }}_move wall/harmonic zhi ${zmax{{ st.index }}} {{ st.z_wall_epsilon }} 0.0 {{ st.z_wall_cutoff }} pbc yes
+fix zwall_lo_{{ st.index }} phase{{ st.index }}_move wall/harmonic zlo ${zmin{{ st.index }}} {{ st.z_wall_epsilon }} 0.0 {{ st.z_wall_cutoff }} pbc yes
+{% endif %}
+
+{% set ens = "npt" if (st.pressure_xy is not none or st.pressure_z is not none) else "nvt" %}
+{% for seg_from, seg_to, seg_steps in st.segments %}
+fix 1 phase{{ st.index }}_move {{ ens }} temp {{ seg_from }} {{ seg_to }} 0.05{% if st.pressure_xy is not none %} x {{ st.pressure_xy }} {{ st.pressure_xy }} 0.5 y {{ st.pressure_xy }} {{ st.pressure_xy }} 0.5{% endif %}{% if st.pressure_z is not none %} z {{ st.pressure_z }} {{ st.pressure_z }} 0.5{% endif %} dilate moving
+run {{ seg_steps }}
+unfix 1
+{% endfor %}
+
+{% if st.pressure_z is none and st.z_wall_epsilon > 0 %}
+unfix zwall_hi_{{ st.index }}
+unfix zwall_lo_{{ st.index }}
+{% endif %}
+
+{% for other in stages if other.index != st.index %}
+unfix freeze_{{ other.index }}_during_{{ st.index }}
+{% endfor %}
+{% endfor %}
+
+undump d_nvt
+
+write_data {{ final_data_file }}

@@ -110,7 +110,11 @@ test:
 # normal gate.
 lammps-smoke:
   stage: test
-  image: ${CI_REGISTRY_IMAGE}/lammps-mace:cpu
+  image:
+    name: ${CI_REGISTRY_IMAGE}/lammps-mace:cpu
+    # Force a fresh pull: :cpu is a mutable tag, and the default IfNotPresent
+    # policy would reuse a node-cached (stale) image after a rebuild.
+    pull_policy: always
   allow_failure: true
   before_script:
     - git config --global
@@ -123,6 +127,13 @@ lammps-smoke:
     # above. Base ([ase, numpy]) + [dev] are light and won't touch torch/mace.
     - pip install --no-cache-dir ".[dev]"
     # --- LAMMPS diagnostics (none of these fail the job) --------------------
+    # Which LAMMPS is baked into THIS image? Absence of the file => an old image
+    # built before the provenance change (i.e. a stale/cached or pre-edit build).
+    - 'cat /opt/lammps-build-info.txt || echo "no build-info: OLD image"'
+    # Does the MLIAP data object expose the method mace-torch needs? This is the
+    # crux of the forward_exchange failure -- check both couples directly.
+    - 'python -c "import mliap_unified_couple_kokkos as k; print(\"kokkos forward_exchange:\", hasattr(k.MLIAPDataPy, \"forward_exchange\"))" || true'
+    - 'python -c "import mliap_unified_couple as p; print(\"plain  forward_exchange:\", hasattr(p.MLIAPDataPy, \"forward_exchange\"))" || true'
     # Is lmp on PATH? (no pipe: `... | head` would SIGPIPE lmp and, under the
     # runner's `set -o pipefail`, fail the job).
     - 'command -v lmp && echo "lmp found" || echo "lmp NOT on PATH"'
