@@ -33,6 +33,7 @@
 #        REG=<your $CI_REGISTRY, e.g. gitlab.tuwien.ac.at:5050>
 #        IMG=$REG/e165-03-1_theoretische_materialchemie/madsen-s-research-group/lammps_active_learning/lammps-mace:cpu
 #        docker login "$REG" && docker build -f docker/Dockerfile.lammps-mace -t "$IMG" . && docker push "$IMG"
+#
 
 FROM python:3.11-slim
 
