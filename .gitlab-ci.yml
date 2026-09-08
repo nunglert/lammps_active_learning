@@ -28,6 +28,7 @@
 
 stages:
   - build
+  - resolve
   - test
 
 # Build & push the CPU MACE-LAMMPS image (docker/Dockerfile.lammps-mace) to this
@@ -71,16 +72,25 @@ build-lammps-image:
 # happily reuse a node-cached, stale `:cpu` image after a rebuild. Pulling by
 # digest instead of the mutable tag sidesteps the whole problem: a digest is
 # content-addressed, so `IfNotPresent` is *correct* there -- no forced pull
-# needed, and no runner-admin config change either. Runs in every pipeline
-# (`needs: build-lammps-image, optional: true` orders it after a same-pipeline
-# rebuild when one happens) so it always reflects whatever is currently
-# published, not just the pipeline's own build.
+# needed, and no runner-admin config change either.
+#
+# Its own `resolve` stage (after `build`, before `test`), not a `needs:` edge
+# on build-lammps-image: build-lammps-image's rules always leave it present
+# but `when: manual` on every commit that doesn't touch the Dockerfile (see
+# its own comment), and a `needs:` on a manual job -- even with
+# `allow_failure: true` + `optional: true`, which is supposed to make this
+# non-blocking -- has been observed to leave this job stalled waiting for
+# that manual job to be played, defeating the "no rebuild required" point of
+# this whole job. Plain stage ordering does not have that problem (a pending
+# manual job with `allow_failure: true` never blocks stage completion), and
+# still runs this after a same-pipeline rebuild whenever one actually
+# happens (Dockerfile-changed rebuilds are automatic, not manual, so they
+# finish within the `build` stage before `resolve` starts) -- so it still
+# always reflects whatever is currently published, not just the pipeline's
+# own build.
 resolve-lammps-image:
-  stage: build
+  stage: resolve
   image: alpine:3.20
-  needs:
-    - job: build-lammps-image
-      optional: true
   script:
     - apk add --no-cache curl jq
     # Single-quoted (not the multi-line plain-scalar style used elsewhere in
@@ -166,12 +176,13 @@ test:
 # Automatic on every commit now (validated with a real build+run -- see
 # CHANGELOG). `image:` is the digest `resolve-lammps-image` resolved (via its
 # dotenv artifact, consumed as $LAMMPS_SMOKE_IMAGE), not a mutable tag -- see
-# that job's comment for why. `needs: resolve-lammps-image` both supplies
-# that variable and (transitively, through *its* `needs:` on
-# build-lammps-image) picks up a same-pipeline rebuild when the Dockerfile
-# just changed. `allow_failure: true` stays on: this tier depends on an
-# external image + registry, so a transient pull/registry hiccup shouldn't
-# block the pipeline.
+# that job's comment for why. `needs: resolve-lammps-image` supplies that
+# variable and, via the `build` -> `resolve` stage ordering (see
+# resolve-lammps-image's comment for why that's a plain stage rather than a
+# `needs:` edge), still runs after a same-pipeline rebuild when the
+# Dockerfile just changed. `allow_failure: true` stays on: this tier depends
+# on an external image + registry, so a transient pull/registry hiccup
+# shouldn't block the pipeline.
 lammps-smoke:
   stage: test
   image:
