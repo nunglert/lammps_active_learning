@@ -96,7 +96,7 @@ def _frame(uncertainties, tag):
     at = Atoms(
         "H2", positions=[[0, 0, 0], [0, 0, 1]], cell=[9, 9, 9], pbc=True
     )
-    at.arrays["uncertainties"] = np.asarray(uncertainties, dtype=float)
+    at.arrays["uncertainty"] = np.asarray(uncertainties, dtype=float)
     at.info["tag"] = tag
     return at
 
@@ -127,3 +127,12 @@ def test_select_max_uncertainty_frames_one_bin_picks_global_peak():
 
     assert len(selected) == 1
     assert selected[0].info["tag"] == "f1"
+
+
+# --- _build_committee_calculator dispatch ----------------------------------
+def test_build_committee_calculator_rejects_unknown_backend():
+    """The backend dispatch itself needs no MACE/ACE/GRACE stack to test."""
+    with pytest.raises(ValueError, match="mace.*ace.*grace"):
+        payload._build_committee_calculator(
+            "quip", model_files=["m.pt"], device="cpu"
+        )

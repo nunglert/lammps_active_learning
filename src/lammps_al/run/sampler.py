@@ -7,10 +7,14 @@ the SLURM templating), while the application picks and wires the actual
 sampling method.
 
 ``LammpsSampler`` is a **native** implementation of that interface for LAMMPS
-molecular dynamics with committee-uncertainty sampling. Per AL iteration it:
+molecular dynamics with committee-uncertainty sampling, generic over the
+committee's potential family (``backend``: ``"mace"`` default, or ``"ace"``/
+``"grace"`` -- see ``lammps_sampling.py``'s module docstring). Per AL
+iteration it:
 
-    1. compiles the committee's first MACE model for LAMMPS and renders the
-       user's ``lammps.in`` jinja2 template;
+    1. compiles the committee's first MACE model for LAMMPS (backend="mace"
+       only -- ACE/GRACE's native pair styles need no compile step) and
+       renders the user's ``lammps.in`` jinja2 template;
     2. runs a LAMMPS MD trajectory on the cluster via a ``SingleScriptTask``
        (shipping the payload ``scripts/lammps_sampling.py``, located by
        :func:`lammps_al.run.scripts.script_dir`);
@@ -18,8 +22,9 @@ molecular dynamics with committee-uncertainty sampling. Per AL iteration it:
        splits the trajectory into ``num_samples`` segments, and returns the
        most-uncertain frame from each.
 
-Step 1 targets one of two LAMMPS/MACE coupling routes, chosen per run via
-``lammps_pair_style`` (default ``"mliap"``, unchanged production behaviour):
+For ``backend="mace"``, step 1 targets one of two LAMMPS/MACE coupling
+routes, chosen per run via ``lammps_pair_style`` (default ``"mliap"``,
+unchanged production behaviour):
 
 * ``"mliap"`` (**default, production**) -- the ML-IAP Python bridge
   (``pair_style mliap unified``), the KOKKOS-on-GPU setup this sampler has
@@ -108,13 +113,22 @@ class LammpsSampler(Sampler):
             (paired with the default ``lammps_pair_style="mliap"``);
             ``lammps_pair_style="mace"`` needs none of these on a CPU-only
             build, so pass "" there.
-        device: torch device for the MACE committee scoring ("cuda" or "cpu").
-        lammps_pair_style: ``"mliap"`` (default, production KOKKOS-on-GPU) or
-            ``"mace"`` (CPU-testable, opt-in -- see the module docstring).
+        device: compute device for the committee calculator, where the
+            backend's calculator takes one ("cuda" or "cpu"; MACE only).
+        lammps_pair_style: For ``backend="mace"``: ``"mliap"`` (default,
+            production KOKKOS-on-GPU) or ``"mace"`` (CPU-testable, opt-in --
+            see the module docstring). For ``backend="ace"``/``"grace"``:
+            the literal LAMMPS pair_style line rendered into the template
+            (e.g. ``"pace"`` or ``"grace pad_verbose padding 0.1"`` -- these
+            need no compile step, unlike MACE).
         enable_cueq: Convert the MACE model to cuequivariance before compiling
             it for LAMMPS (production default). Only used when
-            ``lammps_pair_style="mliap"``. Set False to compile the plain
-            e3nn model without the cuequivariance requirement (CPU builds).
+            ``backend="mace"`` and ``lammps_pair_style="mliap"``.
+        backend: Which committee-potential family drives both the MD and the
+            uncertainty scoring: ``"mace"`` (default), ``"ace"``
+            (pacemaker), or ``"grace"`` (gracemaker) -- see
+            ``lammps_sampling.py``'s module docstring for the calculator
+            dispatch.
         stub: Dry-run without a cluster; emit mock samples for testing
     """
 
@@ -134,6 +148,7 @@ class LammpsSampler(Sampler):
         device: str = "cuda",
         lammps_pair_style: str = "mliap",
         enable_cueq: bool = True,
+        backend: str = "mace",
         stub: bool = False,
         cluster_config: Optional[ClusterConfig] = None,
         sampling_frequency: Optional[int] = None,
@@ -154,6 +169,7 @@ class LammpsSampler(Sampler):
         self.device = device
         self.lammps_pair_style = lammps_pair_style
         self.enable_cueq = enable_cueq
+        self.backend = backend
         self.remote_savepath = remote_savepath
         self.loop_time = loop_time
         self.cluster_config = cluster_config
@@ -175,6 +191,7 @@ class LammpsSampler(Sampler):
             "device": self.device,
             "lammps_pair_style": self.lammps_pair_style,
             "enable_cueq": self.enable_cueq,
+            "backend": self.backend,
             "bin_count": self.num_samples,
             "cutoff_radius": self.uncertainty_cutoff_radius,
             "element_mapping": self.element_mapping,

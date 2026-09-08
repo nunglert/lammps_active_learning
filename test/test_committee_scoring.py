@@ -1,12 +1,16 @@
 """Integration test for the MACE-committee scoring half of the payload.
 
-Exercises ``get_samples_from_dump`` end-to-end on CPU: parse a LAMMPS dump,
-score every frame's committee force-uncertainty with a real (small) MACE
-committee, aggregate locally, and select the peak-uncertainty frame per segment
--- writing ``samples.xyz`` and the annotated full trajectory. This needs the
-MACE stack (``[run]`` extra) and a couple of committee models, but **no LAMMPS
-binary and no GPU**; it self-skips when either is missing. The ``lmp`` half is
-covered separately (``test_lammps_integration.py``, the ``lammps`` tier).
+Exercises ``get_samples_from_dump`` end-to-end on CPU with the default
+``backend="mace"``: parse a LAMMPS dump, score every frame's committee
+force-uncertainty with a real (small) MACE committee, aggregate locally, and
+select the peak-uncertainty frame per segment -- writing ``samples.xyz`` and
+the annotated full trajectory. This needs the MACE stack (``[run]`` extra)
+and a couple of committee models, but **no LAMMPS binary and no GPU**; it
+self-skips when either is missing. The ``lmp`` half is covered separately
+(``test_lammps_integration.py``, the ``lammps`` tier). The ``ace``/``grace``
+dispatch branches in ``_build_committee_calculator`` are not exercised here
+-- they need ``pyace``/``tensorpotential`` installed, which no test tier
+currently pulls in.
 
 The committee models are borrowed from ``examples/mace_md_AL`` (Cu/Co/H); the
 LAMMPS dump is synthesized here so no dump fixture needs shipping.
@@ -105,7 +109,7 @@ def test_get_samples_from_dump_scores_and_selects(tmp_path):
     annotated = ase.io.read(full, index=":")
     assert len(annotated) == 4
     for at in annotated:
-        unc = at.arrays["uncertainties"]
+        unc = at.arrays["uncertainty"]
         assert unc.shape == (4,)
         assert np.all(np.isfinite(unc))
         assert np.all(unc >= 0.0)

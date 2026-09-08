@@ -140,6 +140,63 @@ def test_validate_bad_device(tmp_path):
         config.validate()
 
 
+def test_ace_backend_allows_arbitrary_pair_style(tmp_path):
+    """backend='ace'/'grace' pair styles are native -- any non-empty
+    pair_style line is valid, unlike backend='mace's mliap/mace fork."""
+    lammps_exe = tmp_path / "lmp"
+    lammps_exe.touch()
+    config = LammpsSamplingInput(
+        lammps_path=lammps_exe,
+        template_file="t.in",
+        data_file="d.in",
+        model_files=["potential.yaml"],
+        element_mapping={"1": "H"},
+        cutoff_radius=5.0,
+        bin_count=10,
+        seed=42,
+        backend="ace",
+        lammps_pair_style="pace",
+    )
+    config.validate()  # does not raise
+
+
+def test_grace_backend_rejects_empty_pair_style(tmp_path):
+    lammps_exe = tmp_path / "lmp"
+    lammps_exe.touch()
+    config = LammpsSamplingInput(
+        lammps_path=lammps_exe,
+        template_file="t.in",
+        data_file="d.in",
+        model_files=["model_dir"],
+        element_mapping={"1": "H"},
+        cutoff_radius=5.0,
+        bin_count=10,
+        seed=42,
+        backend="grace",
+        lammps_pair_style="",
+    )
+    with pytest.raises(ScriptInputError, match="lammps_pair_style"):
+        config.validate()
+
+
+def test_validate_bad_backend(tmp_path):
+    lammps_exe = tmp_path / "lmp"
+    lammps_exe.touch()
+    config = LammpsSamplingInput(
+        lammps_path=lammps_exe,
+        template_file="t.in",
+        data_file="d.in",
+        model_files=["m.pt"],
+        element_mapping={"1": "H"},
+        cutoff_radius=5.0,
+        bin_count=10,
+        seed=42,
+        backend="quip",
+    )
+    with pytest.raises(ScriptInputError, match="backend"):
+        config.validate()
+
+
 def test_validate_negative_cutoff(tmp_path):
     """Validation fails for a non-positive cutoff radius."""
     lammps_exe = tmp_path / "lmp"

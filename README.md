@@ -17,28 +17,35 @@ implementing `remote_handler`'s `Sampler` interface.
 
 ## What lives here
 
-- `lammps_al.run.sampler` — `LammpsSampler`, a native `remote_handler.Sampler`.
-  Per AL iteration it compiles the committee's MACE model for LAMMPS, renders
-  the user's `lammps.in` jinja2 template, runs a LAMMPS MD trajectory on the
-  cluster via a `remote_handler` `SingleScriptTask`, scores every frame's
-  local force-uncertainty against the committee, and returns the
-  most-uncertain frame from each of `num_samples` trajectory segments. Needs
+- `lammps_al.run.sampler` — `LammpsSampler`, a native `remote_handler.Sampler`,
+  generic over the committee's potential family via `backend` (`"mace"` default,
+  `"ace"`, or `"grace"`). Per AL iteration it compiles the committee's model for
+  LAMMPS (`backend="mace"` only -- ACE's/GRACE's native pair styles need no compile
+  step), renders the user's `lammps.in` jinja2 template, runs a LAMMPS MD trajectory
+  on the cluster via a `remote_handler` `SingleScriptTask`, scores every frame's
+  local force-uncertainty against the committee (via the backend's ensemble ASE
+  calculator), and returns the most-uncertain frame from each of `num_samples`
+  trajectory segments, each tagged with a per-atom `uncertainty` array. Needs
   the `[run]` extra. Supports `stub=True` for cluster-free dry runs.
-  The compile step targets one of two LAMMPS/MACE couplings, chosen via
-  `lammps_pair_style` (default `"mliap"`, unchanged production behaviour --
+  For `backend="mace"`, the compile step targets one of two LAMMPS/MACE couplings,
+  chosen via `lammps_pair_style` (default `"mliap"`, unchanged production behaviour --
   the ML-IAP `mliap unified` Python bridge, KOKKOS-on-GPU): `"mace"` is an
   opt-in, CPU-testable alternative (LAMMPS's native `pair_style mace`, the
   `ML-MACE` package built against LibTorch directly) used only by the
   `lammps` CI/local test tier, not a production default -- see that
-  sampler's module docstring for why.
+  sampler's module docstring for why. For `backend="ace"`/`"grace"`,
+  `lammps_pair_style` is instead the literal pair_style line rendered into the
+  template (e.g. `"pace"` or `"grace pad_verbose padding 0.1"`).
 - `lammps_al.run.inputs.LammpsSamplingInput` — the JSON contract between the
   host-side sampler and the cluster-side payload (a `remote_handler.ScriptInput`
   subclass).
 - `lammps_al.run.scripts.lammps_sampling.py` — the cluster-side payload shipped
   and executed by the sampler; `lammps_al.run.scripts.script_dir()` locates it
-  from a non-editable install. It runs in the remote conda env (needs a MACE
-  stack + a LAMMPS build with ML-IAP + Kokkos-CUDA by default, or the
-  `ML-MACE` package for `lammps_pair_style="mace"`), not on the host.
+  from a non-editable install. It runs in the remote conda env, which needs
+  `lammps_al` plus whichever `backend`'s stack: MACE (`mace-torch` + a LAMMPS
+  build with ML-IAP + Kokkos-CUDA by default, or the `ML-MACE` package for
+  `lammps_pair_style="mace"`), ACE (`pyace`/pacemaker, conda-forge), or GRACE
+  (`tensorpotential`/gracemaker) -- not on the host.
 
 - `lammps_al.embedding.sampler` — `AmorphousEmbeddingSampler`, a second
   native `remote_handler.Sampler`. Per AL iteration it extracts regions of

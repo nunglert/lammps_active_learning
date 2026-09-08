@@ -31,7 +31,10 @@ class LammpsSamplingInput(ScriptInput):
         lammps_path: Path to LAMMPS executable
         template_file: Name of LAMMPS input template file
         data_file: Name of initial structure data file
-        model_files: List of paths to MACE model files (for committee)
+        model_files: List of paths to the committee's model files. Format
+            depends on ``backend``: MACE ``.model`` files, an ACE
+            pacemaker ``.yaml``/``.yace`` file per member, or a GRACE
+            gracemaker model directory per member.
         element_mapping: Dict mapping atom numbers to element symbols
         cutoff_radius: Cutoff radius for local uncertainty aggregation
             (Angstrom)
@@ -77,10 +80,28 @@ class LammpsSamplingInput(ScriptInput):
     #     (docker/Dockerfile.lammps-mace), not a production default.
     lammps_pair_style: str = "mliap"
     # Convert the MACE model to cuequivariance before compiling it for LAMMPS
-    # (production default). Only used when lammps_pair_style="mliap". Set
-    # False to compile the plain e3nn model without the cuequivariance
-    # requirement (CPU builds).
+    # (production default). Only used when backend="mace" and
+    # lammps_pair_style="mliap". Set False to compile the plain e3nn model
+    # without the cuequivariance requirement (CPU builds); unused by
+    # backend="ace"/"grace".
     enable_cueq: bool = True
+    # Which committee-potential family drives both the MD and the
+    # uncertainty scoring:
+    #   "mace" (default): see lammps_pair_style above for the mliap/mace
+    #     compile-route choice.
+    #   "ace": pacemaker-fit ACE potentials (.yaml/.yace). LAMMPS's native
+    #     `pair_style pace` reads the potential file directly -- no compile
+    #     step. `lammps_pair_style` becomes the literal pair_style line
+    #     rendered into the template (e.g. "pace").
+    #   "grace": gracemaker-fit GRACE potentials (a model directory per
+    #     member). LAMMPS's native `pair_style grace` reads the directory
+    #     directly -- no compile step. `lammps_pair_style` becomes the
+    #     literal pair_style line (e.g. "grace pad_verbose padding 0.1").
+    # Committee uncertainty scoring dispatches per backend in
+    # lammps_sampling.py: MACE's `MACECalculator` (forces_comm, stdev
+    # computed here), ACE's `PyACEEnsembleCalculator`, or GRACE's
+    # `TPCalculator` (both already return an aggregated `forces_std`).
+    backend: str = "mace"
 
     def validate(self, root: Optional[Path] = None) -> None:
         """Validate configuration parameters.
@@ -111,10 +132,28 @@ class LammpsSamplingInput(ScriptInput):
                 f"device must be 'cpu' or 'cuda', got {self.device!r}"
             )
 
-        if self.lammps_pair_style not in ("mliap", "mace"):
+        if self.backend not in ("mace", "ace", "grace"):
             raise ScriptInputError(
-                "lammps_pair_style must be 'mliap' or 'mace', got "
-                f"{self.lammps_pair_style!r}"
+                "backend must be 'mace', 'ace', or 'grace', got "
+                f"{self.backend!r}"
+            )
+
+        # The mliap/mace compile-route fork only exists for the MACE
+        # backend; ace/grace's pair styles are native (no compile step), so
+        # lammps_pair_style is just the literal pair_style line for them --
+        # any non-empty string is valid.
+        if self.backend == "mace" and self.lammps_pair_style not in (
+            "mliap",
+            "mace",
+        ):
+            raise ScriptInputError(
+                "lammps_pair_style must be 'mliap' or 'mace' for "
+                f"backend='mace', got {self.lammps_pair_style!r}"
+            )
+        if self.backend != "mace" and not self.lammps_pair_style:
+            raise ScriptInputError(
+                "lammps_pair_style must be a non-empty pair_style line for "
+                f"backend={self.backend!r}"
             )
 
         if root is not None:

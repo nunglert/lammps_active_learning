@@ -1,11 +1,26 @@
 """Cluster-side LAMMPS committee-uncertainty sampling payload.
 
-Runs one LAMMPS MD trajectory driven by a MACE model, scores every frame's
-local force-uncertainty across the committee, and writes the most-uncertain
-frame of each trajectory segment to ``out/samples.xyz``.
+Runs one LAMMPS MD trajectory driven by the committee's first model, scores
+every frame's local force-uncertainty across the committee, and writes the
+most-uncertain frame of each trajectory segment to ``out/samples.xyz``.
+Every frame also carries a per-atom ``uncertainty`` array (the input
+:class:`lammps_al.embedding.extractor.ROIExtractor` expects).
 
-Two LAMMPS/MACE coupling routes, chosen per run via
-``LammpsSamplingInput.lammps_pair_style``:
+Backend-generic over the committee's potential family
+(``LammpsSamplingInput.backend``: ``"mace"``, ``"ace"``, or ``"grace"``) --
+only the compile step and the committee-scoring calculator
+(:func:`_build_committee_calculator`) are backend-specific; template
+rendering, the LAMMPS run, and the uncertainty aggregation/selection logic
+are shared. ACE's native ``pair_style pace`` and GRACE's native
+``pair_style grace`` read their potential file/directory directly (no
+compile step, unlike MACE); ACE/GRACE committee scoring uses their own
+ensemble ASE calculators (``pyace``'s ``PyACEEnsembleCalculator``,
+``tensorpotential``'s ``TPCalculator``), which already aggregate a
+``forces_std`` across the committee, unlike MACE's ``MACECalculator``
+(``forces_comm``, per-model forces -- the stdev is computed here).
+
+For ``backend="mace"``, two LAMMPS/MACE coupling routes are chosen per run
+via ``LammpsSamplingInput.lammps_pair_style``:
 
 * ``"mliap"`` (**default, production**) -- the ML-IAP Python bridge
   (``pair_style mliap unified``, ``LAMMPS_MLIAP_MACE``, pickled with
@@ -339,22 +354,99 @@ def aggregate_uncertainties(
 def select_max_uncertainty_frames(structs: list, bin_count: int) -> list:
     """Pick the peak-uncertainty frame from each of ``bin_count`` segments.
 
-    Splits ``structs`` (which must each carry a per-atom ``uncertainties``
+    Splits ``structs`` (which must each carry a per-atom ``uncertainty``
     array and share a constant atom count) into ``bin_count`` equal contiguous
     segments and returns, for each segment, the frame whose single most
     uncertain atom is largest. ``len(structs)`` must be divisible by
     ``bin_count`` (the caller trims the tail first).
 
     This is the pure selection core of :func:`get_samples_from_dump`, split out
-    so the binning/argmax logic is unit-testable without MACE or LAMMPS.
+    so the binning/argmax logic is unit-testable without any committee
+    backend or LAMMPS.
     """
     num_atoms = np.array(structs).shape[1]
-    uncertainties = np.array([s.arrays["uncertainties"] for s in structs])
+    uncertainties = np.array([s.arrays["uncertainty"] for s in structs])
     uncertainties = uncertainties.reshape((bin_count, -1, num_atoms))
     segment_size = uncertainties.shape[1]
     offsets = np.arange(0, bin_count * segment_size, segment_size)
     indices = np.argmax(uncertainties.max(axis=2), axis=1) + offsets
     return [structs[i] for i in indices]
+
+
+def _build_committee_calculator(backend: str, model_files: list, device: str):
+    """Build one ASE calculator spanning the whole committee.
+
+    Each backend's ensemble calculator already reports (or, for MACE, makes
+    directly computable) a per-atom, per-component force standard deviation
+    across its members -- read back by :func:`_committee_force_stdev`. Built
+    once per :func:`get_samples_from_dump` call and reused across every
+    trajectory frame (re-instantiating a calculator per frame would reload
+    every committee member's weights each time).
+
+    Args:
+        backend: ``"mace"``, ``"ace"``, or ``"grace"``.
+        model_files: Committee member paths (format depends on ``backend``,
+            see ``LammpsSamplingInput.model_files``).
+        device: Compute device, where the backend's calculator takes one
+            (MACE's torch device; unused by ACE/GRACE).
+
+    Returns:
+        The backend's ASE ``Calculator`` instance.
+    """
+    if backend == "mace":
+        from mace.calculators.mace import MACECalculator
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=FutureWarning)
+            warnings.filterwarnings("ignore", category=UserWarning)
+            return MACECalculator(
+                model_paths=model_files,
+                device=device,
+                default_dtype="float32",
+                enable_cueq=_cuet_available(),
+            )
+    elif backend == "ace":
+        # python-ace/pacemaker (conda-forge; PyPI's "pyace" is an unrelated
+        # package -- do not `pip install pyace`).
+        from pyace import PyACEEnsembleCalculator
+
+        return PyACEEnsembleCalculator([str(p) for p in model_files])
+    elif backend == "grace":
+        # gracemaker / tensorpotential.
+        from tensorpotential.calculator.asecalculator import TPCalculator
+
+        return TPCalculator(model=[str(p) for p in model_files])
+    else:
+        raise ValueError(
+            f"Unknown committee backend {backend!r}; expected 'mace', "
+            "'ace', or 'grace'."
+        )
+
+
+def _committee_force_stdev(backend: str, atoms, calculator) -> np.ndarray:
+    """Per-atom, per-component force standard deviation across the committee.
+
+    Runs ``calculator`` (built once by :func:`_build_committee_calculator`)
+    on ``atoms`` and reads back the ensemble spread: MACE's calculator
+    reports every member's forces (``forces_comm``), so the stdev is
+    computed here; ACE's and GRACE's ensemble calculators already aggregate
+    one (``forces_std``).
+
+    Args:
+        backend: ``"mace"``, ``"ace"``, or ``"grace"``.
+        atoms: Structure to evaluate (mutated: ``atoms.calc`` is set).
+        calculator: The committee calculator from
+            :func:`_build_committee_calculator`.
+
+    Returns:
+        Force standard deviation, shape ``(n_atoms, 3)``.
+    """
+    atoms.calc = calculator
+    atoms.get_potential_energy()
+    if backend == "mace":
+        forces = atoms.calc.results["forces_comm"]
+        return np.std(forces, axis=0, ddof=1)
+    return atoms.calc.results["forces_std"]
 
 
 def get_samples_from_dump(
@@ -368,6 +460,7 @@ def get_samples_from_dump(
     output_full_uncertainties_traj: bool = False,
     full_file: pathlib.Path = None,
     device: str = "cuda",
+    backend: str = "mace",
 ) -> None:
     """Sample from the given trajectory by dividing it into segments and
     sampling the structure with the highest individual local uncertainty value
@@ -375,8 +468,8 @@ def get_samples_from_dump(
 
     Args:
         trajectory_file: Path to lammps .dump output file to sample from
-        model_files: List of Paths to models to calculate committee
-            uncertainties with
+        model_files: List of Paths to the committee's model files (format
+            depends on ``backend``)
         element_mapping: Dict that maps the atom species number from the given
             trajectory file (as strings) to the corresponding element symbol
         cutoff_radius: cutoff radius (in Angstrom) for calculating the local
@@ -391,10 +484,11 @@ def get_samples_from_dump(
             output the full trajectory with attached uncertainties
         full_file: if output_full_uncertainties_traj=True, the full trajectory
             with attached uncertainties is output to this path
-        device: torch device for the MACE committee ("cuda" or "cpu").
+        device: compute device for the committee calculator, where the
+            backend's calculator takes one ("cuda" or "cpu"; MACE only)
+        backend: ``"mace"``, ``"ace"``, or ``"grace"`` -- see the module
+            docstring and :func:`_build_committee_calculator`.
     """
-    from mace.calculators.mace import MACECalculator
-
     structs = ase.io.read(
         trajectory_file, format="lammps-dump-text", index=":"
     )
@@ -412,22 +506,11 @@ def get_samples_from_dump(
         for atom in atoms:
             atom.symbol = element_mapping[str(atom.number)]
 
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", category=FutureWarning)
-        warnings.filterwarnings("ignore", category=UserWarning)
-        model_calc = MACECalculator(
-            model_paths=model_files,
-            device=device,
-            default_dtype="float32",
-            enable_cueq=_cuet_available(),
-        )
+    model_calc = _build_committee_calculator(backend, model_files, device)
 
     for atoms in structs:
         a = atoms.copy()
-        a.calc = model_calc
-        a.get_potential_energy()
-        forces = a.calc.results["forces_comm"]
-        stdev = np.std(forces, axis=0, ddof=1)
+        stdev = _committee_force_stdev(backend, a, model_calc)
         struct_uncertainties = aggregate_uncertainties(
             atom_pos=a.get_positions(),
             unit_cell=a.cell,
@@ -435,7 +518,7 @@ def get_samples_from_dump(
             atomic_uncertainties=stdev,
             r_cut=cutoff_radius,
         )
-        atoms.arrays["uncertainties"] = struct_uncertainties
+        atoms.arrays["uncertainty"] = struct_uncertainties
 
     if output_full_uncertainties_traj and full_file is not None:
         ase.io.write(full_file, structs, format="extxyz")
@@ -478,7 +561,11 @@ def main(argv: Optional[list] = None) -> None:
     samples_file = outpath / "samples.xyz"
     full_traj_file = outpath / "traj+uncertainties.xyz"
 
-    if input_config.lammps_pair_style == "mace":
+    if input_config.backend != "mace":
+        # ACE's `pair_style pace` and GRACE's `pair_style grace` read their
+        # potential file/directory directly -- no compile step.
+        compiled_model_path = model_paths[0]
+    elif input_config.lammps_pair_style == "mace":
         compiled_model_path = create_lammps_mace_model(
             model_path=model_paths[0],
             do_return_path=True,
@@ -519,6 +606,7 @@ def main(argv: Optional[list] = None) -> None:
         full_file=full_traj_file,
         logger=logging.getLogger(),
         device=input_config.device,
+        backend=input_config.backend,
     )
 
     # Success marker checked by SingleScriptTask.finish_check on the host.

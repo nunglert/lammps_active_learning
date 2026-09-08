@@ -34,7 +34,7 @@ readme = "README.md"
 # LAMMPS build with the MLIAP/MACE interface. Installing this on the cluster
 # also brings lammps_al itself (for the LammpsSamplingInput schema).
 run = [
-    "remote_handler[dev,mace_freeze] @ git+ssh://git@gitlab.tuwien.ac.at/e165-03-1_theoretische_materialchemie/madsen-s-research-group/remote_handler.git@dev-NU",
+    "remote_handler[dev,mace_freeze,ace,grace] @ git+ssh://git@gitlab.tuwien.ac.at/e165-03-1_theoretische_materialchemie/madsen-s-research-group/remote_handler.git@dev-NU",
 ]
 # OVITO, for interface/surface-normal detection in the amorphous-matrix
 # embedding payload (lammps_al.embedding.scripts.surface_mesh). Only needed
