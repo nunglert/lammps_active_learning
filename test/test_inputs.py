@@ -97,7 +97,28 @@ def test_defaults_are_gpu(tmp_path):
     assert config.lammps_args == (
         "-k on g 1 -sf kk -pk kokkos newton on neigh half"
     )
+    assert config.lammps_pair_style == "mliap"
+    assert config.enable_cueq is True
     config.validate()  # valid without root
+
+
+def test_validate_bad_pair_style(tmp_path):
+    """An unknown lammps_pair_style is rejected."""
+    lammps_exe = tmp_path / "lmp"
+    lammps_exe.touch()
+    config = LammpsSamplingInput(
+        lammps_path=lammps_exe,
+        template_file="t.in",
+        data_file="d.in",
+        model_files=["m.pt"],
+        element_mapping={"1": "H"},
+        cutoff_radius=5.0,
+        bin_count=10,
+        seed=42,
+        lammps_pair_style="unified",
+    )
+    with pytest.raises(ScriptInputError, match="lammps_pair_style"):
+        config.validate()
 
 
 def test_validate_bad_device(tmp_path):

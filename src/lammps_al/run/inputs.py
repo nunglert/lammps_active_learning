@@ -57,14 +57,29 @@ class LammpsSamplingInput(ScriptInput):
     seed: int
     lammps_config_name: str = "lammps.in"
     # LAMMPS accelerator/package flags inserted between ``-in`` and ``-log``.
-    # Default is KOKKOS-on-GPU (production); pass a CPU variant (or "") to run
-    # a non-GPU build, e.g. in CI.
+    # Default is KOKKOS-on-GPU (production, paired with the default
+    # lammps_pair_style="mliap"); pass "" (or a CPU-appropriate variant) to
+    # run a CPU-only build, e.g. in CI -- lammps_pair_style="mace" needs no
+    # flags at all on CPU.
     lammps_args: str = "-k on g 1 -sf kk -pk kokkos newton on neigh half"
     # torch device for the MACE committee scoring ("cuda" or "cpu").
     device: str = "cuda"
+    # Which LAMMPS/MACE coupling to compile the driving model for and render
+    # into the template (as {{ lammps_pair_style }}):
+    #   "mliap" (default, production): the ML-IAP Python bridge
+    #     (`pair_style mliap unified`), matching the KOKKOS-on-GPU production
+    #     setup. Needs `enable_cueq` below; LAMMPS's ghost-atom message
+    #     passing for multi-layer models is Kokkos-CUDA-only, so this route
+    #     does not run correctly CPU-only.
+    #   "mace": LAMMPS's native `pair_style mace` (the `ML-MACE` package,
+    #     LibTorch directly). Works CPU-only -- this is what the CI
+    #     `lammps-smoke` job and local Docker-based testing use
+    #     (docker/Dockerfile.lammps-mace), not a production default.
+    lammps_pair_style: str = "mliap"
     # Convert the MACE model to cuequivariance before compiling it for LAMMPS
-    # (production default). False compiles the plain e3nn model and drops the
-    # cuequivariance requirement, so a CPU-only build (e.g. CI) can run.
+    # (production default). Only used when lammps_pair_style="mliap". Set
+    # False to compile the plain e3nn model without the cuequivariance
+    # requirement (CPU builds).
     enable_cueq: bool = True
 
     def validate(self, root: Optional[Path] = None) -> None:
@@ -94,6 +109,12 @@ class LammpsSamplingInput(ScriptInput):
         if self.device not in ("cpu", "cuda"):
             raise ScriptInputError(
                 f"device must be 'cpu' or 'cuda', got {self.device!r}"
+            )
+
+        if self.lammps_pair_style not in ("mliap", "mace"):
+            raise ScriptInputError(
+                "lammps_pair_style must be 'mliap' or 'mace', got "
+                f"{self.lammps_pair_style!r}"
             )
 
         if root is not None:

@@ -130,16 +130,12 @@ lammps-smoke:
     # Which LAMMPS is baked into THIS image? Absence of the file => an old image
     # built before the provenance change (i.e. a stale/cached or pre-edit build).
     - 'cat /opt/lammps-build-info.txt || echo "no build-info: OLD image"'
-    # Does the MLIAP data object expose the method mace-torch needs? This is the
-    # crux of the forward_exchange failure -- check both couples directly.
-    - 'python -c "import mliap_unified_couple_kokkos as k; print(\"kokkos forward_exchange:\", hasattr(k.MLIAPDataPy, \"forward_exchange\"))" || true'
-    - 'python -c "import mliap_unified_couple as p; print(\"plain  forward_exchange:\", hasattr(p.MLIAPDataPy, \"forward_exchange\"))" || true'
     # Is lmp on PATH? (no pipe: `... | head` would SIGPIPE lmp and, under the
     # runner's `set -o pipefail`, fail the job).
     - 'command -v lmp && echo "lmp found" || echo "lmp NOT on PATH"'
     # Missing shared libraries (e.g. libtorch) show up here as "not found".
     - 'ldd "$(command -v lmp)" 2>&1 || true'
-    # Does it actually run + list packages (MLIAP/KOKKOS must be present)?
+    # Does it actually run + list packages (ML-MACE must be present)?
     - 'lmp -h > lmp_help.txt 2>&1; echo "lmp -h exit=$?"'
     - 'grep -iA40 "Installed packages" lmp_help.txt || tail -30 lmp_help.txt || true'
   script:

@@ -142,7 +142,9 @@ def test_update_merges_schedule_kwargs_into_script_input(
     s = _sampler(mock_remote_fs, tmp_path, num_samples=None, stub=False)
     created = _patch_single_script_task(monkeypatch)
 
-    s.update(tmp_path / "calcdir", mock_model_files, temperature=1000, n_run=500)
+    s.update(
+        tmp_path / "calcdir", mock_model_files, temperature=1000, n_run=500
+    )
 
     script_input = json.loads(Path(created["input_file"]).read_text())
     assert script_input["temperature"] == 1000
@@ -204,22 +206,29 @@ def test_lammps_create_stub_outputs(mock_remote_fs, tmp_path):
 
 
 def test_default_accelerator_is_gpu(mock_remote_fs, tmp_path):
-    """Defaults preserve the production KOKKOS-on-GPU behaviour."""
+    """Defaults preserve the production KOKKOS-on-GPU + ML-IAP behaviour."""
     s = _sampler(mock_remote_fs, tmp_path)
     assert s.lammps_args == "-k on g 1 -sf kk -pk kokkos newton on neigh half"
     assert s.device == "cuda"
+    assert s.lammps_pair_style == "mliap"
+    assert s.enable_cueq is True
 
 
 def test_cpu_override_is_stored(mock_remote_fs, tmp_path):
-    """A CPU run overrides the accelerator flags and device."""
+    """A CPU-testable run overrides the accelerator flags, device, and
+    pair_style -- opting into the ``"mace"`` route, not the default."""
     s = _sampler(
         mock_remote_fs,
         tmp_path,
-        lammps_args="-k on t 2 -sf kk -pk kokkos newton on neigh half",
+        lammps_args="",
         device="cpu",
+        lammps_pair_style="mace",
+        enable_cueq=False,
     )
-    assert "t 2" in s.lammps_args
+    assert s.lammps_args == ""
     assert s.device == "cpu"
+    assert s.lammps_pair_style == "mace"
+    assert s.enable_cueq is False
 
 
 def test_lammps_raises_on_unfinished(mock_remote_fs, tmp_path):

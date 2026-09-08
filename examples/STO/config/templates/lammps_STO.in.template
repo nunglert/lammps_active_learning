@@ -10,8 +10,13 @@ boundary    p p p
 read_data   {{ data_file }}
 
 
+{% if lammps_pair_style == "mace" %}
+pair_style  mace
+pair_coeff  * * ${model_file} O Sr Ti
+{% else %}
 pair_style  mliap unified ${model_file} 0
 pair_coeff  * * O Sr Ti
+{% endif %}
 
 
 velocity    all create {{ temperature }} {{ seed }} dist gaussian rot yes mom yes sum yes

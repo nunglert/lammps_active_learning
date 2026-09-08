@@ -9,8 +9,8 @@ sampling method.
 ``LammpsSampler`` is a **native** implementation of that interface for LAMMPS
 molecular dynamics with committee-uncertainty sampling. Per AL iteration it:
 
-    1. compiles the committee's first MACE model for LAMMPS (MLIAP) and renders
-       the user's ``lammps.in`` jinja2 template;
+    1. compiles the committee's first MACE model for LAMMPS and renders the
+       user's ``lammps.in`` jinja2 template;
     2. runs a LAMMPS MD trajectory on the cluster via a ``SingleScriptTask``
        (shipping the payload ``scripts/lammps_sampling.py``, located by
        :func:`lammps_al.run.scripts.script_dir`);
@@ -18,10 +18,30 @@ molecular dynamics with committee-uncertainty sampling. Per AL iteration it:
        splits the trajectory into ``num_samples`` segments, and returns the
        most-uncertain frame from each.
 
+Step 1 targets one of two LAMMPS/MACE coupling routes, chosen per run via
+``lammps_pair_style`` (default ``"mliap"``, unchanged production behaviour):
+
+* ``"mliap"`` (**default, production**) -- the ML-IAP Python bridge
+  (``pair_style mliap unified``), the KOKKOS-on-GPU setup this sampler has
+  always targeted.
+* ``"mace"`` (**CPU-testable, opt-in**) -- LAMMPS's native ``pair_style mace``
+  (the ``ML-MACE`` package, built against LibTorch directly). For any MACE
+  model with more than one interaction layer (i.e. essentially all real
+  models), the ML-IAP route needs LAMMPS's ghost-atom message-passing hooks,
+  which are Kokkos-CUDA-only -- confirmed by building both the ACEsuit
+  LAMMPS fork and vanilla upstream ``develop`` and hitting ``AttributeError:
+  ... no attribute 'forward_exchange'`` on CPU either way. ``"mace"`` has no
+  such limitation and is what the CPU-only ``lammps-smoke`` CI job (and
+  local Docker-based testing, see ``docker/Dockerfile.lammps-mace``) use --
+  it exists purely to make this sampler's payload testable without a GPU,
+  not to replace the production route.
+
 Requires the ``[run]`` extra (``pip install ".[run]"`` -> remote_handler + a
 MACE stack). The cluster conda env that runs the payload needs ``lammps_al``
-(for the input schema), ``mace-torch``, ``torch`` and a LAMMPS build with the
-MLIAP/MACE interface; the host side needs just ``remote_handler`` + ``ase``.
+(for the input schema), ``mace-torch``, ``torch`` and a LAMMPS build with
+either package (``mliap`` needs ML-IAP + Kokkos-CUDA; ``mace`` needs the
+``ML-MACE`` package, CPU or GPU); the host side needs just
+``remote_handler`` + ``ase``.
 
 ``stub=True`` dry-runs the loop (mock samples, no cluster) for testing.
 """
@@ -51,9 +71,7 @@ logger = logging.getLogger(__name__)
 def remap_elements(
     structs: list, element_mapping: Optional[dict] = None
 ) -> list:
-    """Convert LAMMPS atom-type indices to element symbols, in place.
-
-    """
+    """Convert LAMMPS atom-type indices to element symbols, in place."""
     if not element_mapping:
         return structs
     for atoms in structs:
@@ -86,11 +104,16 @@ class LammpsSampler(Sampler):
         remote_savepath: Path on the remote machine for calculation files
         loop_time: Interval (seconds) to poll for job completion
         lammps_args: LAMMPS accelerator/package flags for the ``lmp`` command
-            (inserted between ``-in`` and ``-log``). Defaults to KOKKOS-on-GPU;
-            pass a CPU variant (or "") for a non-GPU build.
+            (inserted between ``-in`` and ``-log``). Defaults to KOKKOS-on-GPU
+            (paired with the default ``lammps_pair_style="mliap"``);
+            ``lammps_pair_style="mace"`` needs none of these on a CPU-only
+            build, so pass "" there.
         device: torch device for the MACE committee scoring ("cuda" or "cpu").
+        lammps_pair_style: ``"mliap"`` (default, production KOKKOS-on-GPU) or
+            ``"mace"`` (CPU-testable, opt-in -- see the module docstring).
         enable_cueq: Convert the MACE model to cuequivariance before compiling
-            it for LAMMPS (production default). Set False to compile the plain
+            it for LAMMPS (production default). Only used when
+            ``lammps_pair_style="mliap"``. Set False to compile the plain
             e3nn model without the cuequivariance requirement (CPU builds).
         stub: Dry-run without a cluster; emit mock samples for testing
     """
@@ -109,6 +132,7 @@ class LammpsSampler(Sampler):
         loop_time: float = 30,
         lammps_args: str = "-k on g 1 -sf kk -pk kokkos newton on neigh half",
         device: str = "cuda",
+        lammps_pair_style: str = "mliap",
         enable_cueq: bool = True,
         stub: bool = False,
         cluster_config: Optional[ClusterConfig] = None,
@@ -128,6 +152,7 @@ class LammpsSampler(Sampler):
         self.remote_lammps_executable_path = remote_lammps_executable_path
         self.lammps_args = lammps_args
         self.device = device
+        self.lammps_pair_style = lammps_pair_style
         self.enable_cueq = enable_cueq
         self.remote_savepath = remote_savepath
         self.loop_time = loop_time
@@ -148,6 +173,7 @@ class LammpsSampler(Sampler):
             "seed": int(np.random.randint(1e6)),
             "lammps_args": self.lammps_args,
             "device": self.device,
+            "lammps_pair_style": self.lammps_pair_style,
             "enable_cueq": self.enable_cueq,
             "bin_count": self.num_samples,
             "cutoff_radius": self.uncertainty_cutoff_radius,
@@ -288,9 +314,7 @@ class LammpsSampler(Sampler):
             output_path = self.results_dir / "out" / "samples.xyz"
             os.makedirs(output_path.parent, exist_ok=True)
             ase.io.write(output_path, sampled_configs)
-            logger.info(
-                f"Sampled configurations written to {output_path}"
-            )
+            logger.info(f"Sampled configurations written to {output_path}")
             return output_path
         else:
             # Run actual LAMMPS sampling
@@ -304,8 +328,8 @@ class LammpsSampler(Sampler):
             self.sampling_task.collect_results()
 
             output_path = (
-                    Path(self.sampling_task.local_savepath) / "out/samples.xyz"
-                )
+                Path(self.sampling_task.local_savepath) / "out/samples.xyz"
+            )
 
         logger.info(f"Sampled configurations written to {output_path}")
         return output_path

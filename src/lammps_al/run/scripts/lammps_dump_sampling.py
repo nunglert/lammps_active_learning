@@ -17,25 +17,30 @@ Shipped and executed on the cluster by a ``LammpsSampler``-style
 can be unit-tested with only ``ase`` + ``numpy`` + ``jinja2`` present.
 
 Reuses the shared LAMMPS-run helpers from ``lammps_sampling.py``
-(``parse_jinja_template``, ``create_lammps_mliap_model``,
-``run_lammps_from_template``), which are already import-safe (the heavy
-``torch``/``mace`` imports are lazy).
+(``parse_jinja_template``, ``create_lammps_mliap_model``/
+``create_lammps_mace_model``, ``run_lammps_from_template``), which are
+already import-safe (the heavy ``torch``/``mace`` imports are lazy). Like
+``lammps_sampling.py``, the driving-model compile route is chosen per run via
+``lammps_pair_style`` (``"mliap"`` default/production, ``"mace"``
+CPU-testable/opt-in) -- see that module's docstring for why.
 """
 
 import logging
 import os
-from dataclasses import dataclass, field as dc_field
+from dataclasses import dataclass
+from dataclasses import field as dc_field
 from pathlib import Path
 from typing import Any, Optional
 
 import ase.io
 import numpy as np  # noqa: F401  (kept for parity/warmup of ase numpy backend)
 
+from lammps_al.run.sampler import remap_elements
 from lammps_al.run.scripts.lammps_sampling import (
+    create_lammps_mace_model,
     create_lammps_mliap_model,
     run_lammps_from_template,
 )
-from lammps_al.run.sampler import remap_elements
 
 logger = logging.getLogger(__name__)
 
@@ -58,14 +63,17 @@ class DumpSamplingInput:
         lammps_path: Path to the LAMMPS executable
         template_file: Name of the LAMMPS input template file
         data_file: Name of the initial structure data file
-        model_files: List of MACE model files (needed only to run MLIAP MD;
+        model_files: List of MACE model files (needed only to run the MD;
             no committee scoring happens here)
         sampling_frequency: Write every Nth trajectory frame to the output
         seed: Random seed for LAMMPS
         lammps_config_name: Name for the generated LAMMPS input file
         lammps_args: LAMMPS accelerator/package flags
-        device: torch device for compiling the MACE MLIAP model
-        enable_cueq: Convert the MACE model to cuequivariance before compiling
+        device: torch device for compiling the MACE model
+        lammps_pair_style: ``"mliap"`` (default, production) or ``"mace"``
+            (CPU-testable, opt-in) -- see ``lammps_sampling.py``.
+        enable_cueq: Convert the MACE model to cuequivariance before
+            compiling. Only used when ``lammps_pair_style="mliap"``.
     """
 
     lammps_path: str
@@ -77,6 +85,7 @@ class DumpSamplingInput:
     lammps_config_name: str = "lammps.in"
     lammps_args: str = DEFAULT_LAMMPS_ARGS
     device: str = "cuda"
+    lammps_pair_style: str = "mliap"
     enable_cueq: bool = True
 
     def validate(self, root: Optional[Path] = None) -> None:
@@ -88,6 +97,11 @@ class DumpSamplingInput:
         if self.device not in ("cpu", "cuda"):
             raise ValueError(
                 f"device must be 'cpu' or 'cuda', got {self.device!r}"
+            )
+        if self.lammps_pair_style not in ("mliap", "mace"):
+            raise ValueError(
+                "lammps_pair_style must be 'mliap' or 'mace', got "
+                f"{self.lammps_pair_style!r}"
             )
         if root is not None:
             for name in ("data_file", "template_file"):
@@ -122,7 +136,9 @@ def select_frequency_frames(structs: list, sampling_frequency: int) -> list:
     return structs[::sampling_frequency]
 
 
-def write_samples(structs: list, samples_file: Path, element_mapping: dict = None) -> None:
+def write_samples(
+    structs: list, samples_file: Path, element_mapping: dict = None
+) -> None:
     """Write sampled structures to an extxyz file."""
     if element_mapping is not None:
         remapped_structs = remap_elements(structs, element_mapping)
@@ -156,10 +172,11 @@ _SCRIPT_KEYS = {
     "data_file",
     "lammps_config_name",
     "sampling_frequency",
-    "enable_cueq",
     "bin_count",
     "cutoff_radius",
     "element_mapping",
+    "lammps_pair_style",
+    "enable_cueq",
 }
 
 
@@ -197,19 +214,27 @@ def main(argv: Optional[list] = None) -> None:
     samples_file = outpath / "samples.xyz"
     trajectory_file = outpath / "md_sampling.dump"
 
-    mliap_path = create_lammps_mliap_model(
-        model_path=model_paths[0],
-        do_return_path=True,
-        enable_cueq=config.get("enable_cueq", True),
-    )
+    pair_style = config.get("lammps_pair_style", "mliap")
+    if pair_style == "mace":
+        compiled_model_path = create_lammps_mace_model(
+            model_path=model_paths[0],
+            do_return_path=True,
+        )
+    else:
+        compiled_model_path = create_lammps_mliap_model(
+            model_path=model_paths[0],
+            do_return_path=True,
+            enable_cueq=config.get("enable_cueq", True),
+        )
 
     # Payload-managed render context ...
     render_kwargs = {
-        "model_file": mliap_path,
+        "model_file": compiled_model_path,
         "data_file": data_path,
         "seed": config.get("seed"),
         "dump_file": trajectory_file,
         "final_data_file": outpath / "surface_final.data",
+        "lammps_pair_style": pair_style,
     }
     # ... plus every non-backend key from the schedule/input, verbatim.
     for key, value in config.items():
@@ -231,7 +256,9 @@ def main(argv: Optional[list] = None) -> None:
     sampled = select_frequency_frames(
         structs, int(config.get("sampling_frequency", 1))
     )
-    write_samples(sampled, samples_file, element_mapping=config["element_mapping"])
+    write_samples(
+        sampled, samples_file, element_mapping=config["element_mapping"]
+    )
 
     # Success marker checked by SingleScriptTask.finish_check on the host.
     (calcpath / "is_finished.info").write_text("LAMMPS sampling finished")

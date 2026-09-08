@@ -18,19 +18,27 @@ implementing `remote_handler`'s `Sampler` interface.
 ## What lives here
 
 - `lammps_al.run.sampler` — `LammpsSampler`, a native `remote_handler.Sampler`.
-  Per AL iteration it compiles the committee's MACE model for LAMMPS (MLIAP),
-  renders the user's `lammps.in` jinja2 template, runs a LAMMPS MD trajectory on
-  the cluster via a `remote_handler` `SingleScriptTask`, scores every frame's
-  local force-uncertainty against the committee, and returns the most-uncertain
-  frame from each of `num_samples` trajectory segments. Needs the `[run]` extra.
-  Supports `stub=True` for cluster-free dry runs.
+  Per AL iteration it compiles the committee's MACE model for LAMMPS, renders
+  the user's `lammps.in` jinja2 template, runs a LAMMPS MD trajectory on the
+  cluster via a `remote_handler` `SingleScriptTask`, scores every frame's
+  local force-uncertainty against the committee, and returns the
+  most-uncertain frame from each of `num_samples` trajectory segments. Needs
+  the `[run]` extra. Supports `stub=True` for cluster-free dry runs.
+  The compile step targets one of two LAMMPS/MACE couplings, chosen via
+  `lammps_pair_style` (default `"mliap"`, unchanged production behaviour --
+  the ML-IAP `mliap unified` Python bridge, KOKKOS-on-GPU): `"mace"` is an
+  opt-in, CPU-testable alternative (LAMMPS's native `pair_style mace`, the
+  `ML-MACE` package built against LibTorch directly) used only by the
+  `lammps` CI/local test tier, not a production default -- see that
+  sampler's module docstring for why.
 - `lammps_al.run.inputs.LammpsSamplingInput` — the JSON contract between the
   host-side sampler and the cluster-side payload (a `remote_handler.ScriptInput`
   subclass).
 - `lammps_al.run.scripts.lammps_sampling.py` — the cluster-side payload shipped
   and executed by the sampler; `lammps_al.run.scripts.script_dir()` locates it
   from a non-editable install. It runs in the remote conda env (needs a MACE
-  stack + a LAMMPS build with the MLIAP/MACE interface), not on the host.
+  stack + a LAMMPS build with ML-IAP + Kokkos-CUDA by default, or the
+  `ML-MACE` package for `lammps_pair_style="mace"`), not on the host.
 
 - `lammps_al.embedding.sampler` — `AmorphousEmbeddingSampler`, a second
   native `remote_handler.Sampler`. Per AL iteration it extracts regions of
@@ -77,8 +85,8 @@ pip install -e ".[dev]" --no-deps
 
 The host side needs only `remote_handler` + `ase` + `numpy`. The **cluster**
 conda env that runs the payload additionally needs `lammps_al` (for the input
-schema), `mace-torch` + `cuequivariance`, `torch`, and a LAMMPS build with the
-MLIAP/MACE interface.
+schema), `mace-torch`, `torch`, and (production default) a LAMMPS build with
+ML-IAP + Kokkos-CUDA.
 
 Versions come from git tags via `setuptools-scm`: tag `vX.Y.Z` and
 `lammps_al.__version__` follows (refreshes on reinstall, not on a bare pull).
@@ -100,13 +108,22 @@ Three tiers cover the sampling machinery at rising cost:
   driven end-to-end on CPU with a real MACE committee over a synthesized LAMMPS
   dump (no `lmp`, no GPU). Self-skips when `remote_handler`/`mace` are absent.
 - **`lammps`** — a full end-to-end smoke run against a real MACE-enabled `lmp`
-  (compile MLIAP model → short MD → committee-score → select). Self-skips unless
+  (compile model → short MD → committee-score → select). Self-skips unless
   such an `lmp` is on PATH; in CI it runs on the prebuilt `lammps-mace` image
-  (`docker/Dockerfile.lammps-mace`).
+  (`docker/Dockerfile.lammps-mace`) -- the same image reproduces this tier
+  locally (`docker run`, see that Dockerfile's header). It runs with
+  `lammps_pair_style="mace"` (LAMMPS's native `pair_style mace`, CPU-only,
+  no Kokkos needed), **not** the production `"mliap"` default -- the ML-IAP
+  route's ghost-atom message passing is Kokkos-CUDA-only, so it cannot run
+  in this CPU tier. See `lammps_sampling.py`'s module docstring for the full
+  story; production is unaffected by any of this.
 
-The payload is import-safe and its accelerator flags / MACE device are
-configurable (`LammpsSamplingInput.lammps_args` / `device`, default
-KOKKOS-on-GPU) — which is what lets the middle tier run on a CPU CI runner.
+The payload is import-safe and its accelerator flags / MACE device / pair
+style are all configurable (`LammpsSamplingInput.lammps_args` / `device` /
+`lammps_pair_style`, defaulting to the production KOKKOS-on-GPU + `"mliap"`
+behaviour) — which is what lets the `lammps` tier opt into a CPU-runnable
+configuration for CI/local testing without changing what a real deployment
+gets by default.
 
 ## Run an AL loop
 

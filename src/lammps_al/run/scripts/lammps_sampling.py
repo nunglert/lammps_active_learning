@@ -4,11 +4,31 @@ Runs one LAMMPS MD trajectory driven by a MACE model, scores every frame's
 local force-uncertainty across the committee, and writes the most-uncertain
 frame of each trajectory segment to ``out/samples.xyz``.
 
+Two LAMMPS/MACE coupling routes, chosen per run via
+``LammpsSamplingInput.lammps_pair_style``:
+
+* ``"mliap"`` (**default, production**) -- the ML-IAP Python bridge
+  (``pair_style mliap unified``, ``LAMMPS_MLIAP_MACE``, pickled with
+  ``torch.save``). This is what the KOKKOS-on-GPU production setup targets.
+* ``"mace"`` (**CPU-testable, opt-in**) -- LAMMPS's native ``pair_style mace``
+  (the ``ML-MACE`` package, built against LibTorch directly,
+  ``LAMMPS_MACE``/TorchScript-compiled). For any MACE model with more than
+  one interaction layer (i.e. essentially all real models), the ML-IAP route
+  needs LAMMPS's ghost-atom message-passing hooks
+  (``forward_exchange``/``reverse_exchange``), which are Kokkos-CUDA-only --
+  confirmed by building both the ACEsuit LAMMPS fork and vanilla upstream
+  ``develop`` and hitting ``AttributeError: ... no attribute
+  'forward_exchange'`` on CPU (Kokkos-OpenMP or no-Kokkos) either way. The
+  ``"mace"`` route has no such limitation and is what the CPU-only
+  ``lammps-smoke`` CI job (and local `docker run` parity, see
+  ``docker/Dockerfile.lammps-mace``) uses -- it is **not** meant to replace
+  the production route, only to make the payload testable without a GPU.
+
 Shipped and executed on the cluster by
 :class:`lammps_al.run.sampler.LammpsSampler` -- it is not imported as a module
 in the normal flow (``main`` runs it from ``sys.argv``), but its functions are
 import-safe so they can be unit-tested. The heavy ``torch`` / ``mace`` imports
-are done lazily inside the two functions that need them, so the pure helpers
+are done lazily inside the functions that need them, so the pure helpers
 (``parse_jinja_template``, ``aggregate_uncertainties``,
 ``select_max_uncertainty_frames``) import with only ``ase`` + ``numpy`` +
 ``jinja2`` present -- no MACE stack, no LAMMPS, no GPU.
@@ -31,9 +51,11 @@ import numpy as np
 # ``LammpsSamplingInput`` (and thus ``remote_handler``) is imported lazily in
 # ``main`` so the pure helpers below import with only ase + numpy + jinja2.
 
-# Default LAMMPS accelerator flags: KOKKOS on one GPU (production default).
-# CPU runs (e.g. CI) override this via LammpsSamplingInput.lammps_args, e.g.
-# "" or "-k on t 2 -sf kk -pk kokkos newton on neigh half" for an OpenMP build.
+# Default LAMMPS accelerator flags: KOKKOS on one GPU (production default,
+# paired with lammps_pair_style="mliap"). CPU runs (e.g. CI, via
+# lammps_pair_style="mace") override this via LammpsSamplingInput.lammps_args
+# -- "" is the right override there, since `pair_style mace` needs no
+# accelerator flags at all on a CPU-only build.
 DEFAULT_LAMMPS_ARGS = "-k on g 1 -sf kk -pk kokkos newton on neigh half"
 
 
@@ -78,7 +100,10 @@ def create_lammps_mliap_model(
     out_path: Optional[pathlib.Path] = None,
     enable_cueq: bool = True,
 ) -> Optional[pathlib.Path]:
-    """Compile a MACE model for use in LAMMPS
+    """Compile a MACE model for LAMMPS's ML-IAP Python bridge
+    (``pair_style mliap unified``) -- the **production** (KOKKOS-on-GPU)
+    route. See the module docstring for why the CPU-testable alternative is
+    :func:`create_lammps_mace_model`, not this function.
 
     Args:
         model_path: Path to the trained MACE model
@@ -119,11 +144,13 @@ def create_lammps_mliap_model(
         heads = [None]
 
     if len(heads) == 1:
-        print(f"Only one head found in the model: {heads[0]}. Skipping selection.")
+        print(
+            f"Only one head found in the model: {heads[0]}. Skipping selection."
+        )
         head = heads[0]
     else:
         head = "Default" if head is None else head
-        
+
     if float32:
         model = model.float().to("cpu")
     else:
@@ -136,6 +163,78 @@ def create_lammps_mliap_model(
     model.lammps_mliap = True
     lammps_model = LAMMPS_MLIAP_MACE(model, head=head)
     torch.save(lammps_model, compiled_path.resolve())
+    return compiled_path if do_return_path else None
+
+
+def create_lammps_mace_model(
+    model_path: pathlib.Path,
+    head: Optional[str] = None,
+    float32: bool = False,
+    do_return_path: bool = False,
+    out_path: Optional[pathlib.Path] = None,
+) -> Optional[pathlib.Path]:
+    """Compile a MACE model into a TorchScript module for LAMMPS's native
+    ``pair_style mace`` (the ``ML-MACE`` package) -- the CPU-testable, opt-in
+    ``lammps_pair_style="mace"`` route; see the module docstring.
+
+    Mirrors the ``--format libtorch`` branch of MACE's own
+    ``mace.cli.create_lammps_model``: wrap the model in ``LAMMPS_MACE`` and
+    compile it with e3nn's ``jit.compile``. Unlike the production
+    ``lammps_pair_style="mliap"`` route (:func:`create_lammps_mliap_model`,
+    ``LAMMPS_MLIAP_MACE`` pickled with ``torch.save``), this needs no
+    ``cuequivariance``/GPU-Kokkos requirement to *run* -- ``pair_style mace``
+    works on a plain CPU build.
+
+    Args:
+        model_path: Path to the trained MACE model
+        head: Which model head to select for compilation
+        float32: Compile a 32-bit model
+        do_return_path: Return a pathlib.Path for the compiled model
+        out_path: Path to file to save the compiled model to
+
+    Returns:
+        If requested, path to the compiled model
+    """
+    import torch
+    from e3nn.util import jit
+    from mace.calculators import LAMMPS_MACE
+
+    if out_path is not None:
+        compiled_path = out_path
+    else:
+        compiled_path = model_path.parent / (model_path.name + "-lammps.pt")
+    model = torch.load(
+        f=model_path.resolve(),
+        map_location=torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu"
+        ),
+        weights_only=False,
+    )
+
+    if hasattr(model, "heads"):
+        heads = model.heads
+    else:
+        heads = [None]
+
+    if len(heads) == 1:
+        print(
+            f"Only one head found in the model: {heads[0]}. Skipping selection."
+        )
+        head = heads[0]
+    else:
+        head = "Default" if head is None else head
+
+    if float32:
+        model = model.float().to("cpu")
+    else:
+        model = model.double().to("cpu")
+    lammps_model = (
+        LAMMPS_MACE(model, head=head)
+        if head is not None
+        else LAMMPS_MACE(model)
+    )
+    lammps_model_compiled = jit.compile(lammps_model)
+    lammps_model_compiled.save(compiled_path.resolve())
     return compiled_path if do_return_path else None
 
 
@@ -361,9 +460,9 @@ def main(argv: Optional[list] = None) -> None:
     input_config = LammpsSamplingInput.from_file(inputfile)
     input_config.validate(calcpath)
 
-    # The MACE LAMMPS-MLIAP interface defaults to GPU and raises on CPU tensors
-    # ("Set MACE_ALLOW_CPU=true ..."). When the run is CPU-bound, opt in so the
-    # lmp subprocess (which inherits this env) can compute on CPU.
+    # MACE's LAMMPS calculators default to GPU and raise on CPU tensors
+    # ("Set MACE_ALLOW_CPU=true ..."). When the run is CPU-bound, opt in so
+    # the lmp subprocess (which inherits this env) can compute on CPU.
     if input_config.device == "cpu":
         os.environ["MACE_ALLOW_CPU"] = "true"
 
@@ -379,11 +478,17 @@ def main(argv: Optional[list] = None) -> None:
     samples_file = outpath / "samples.xyz"
     full_traj_file = outpath / "traj+uncertainties.xyz"
 
-    mliap_path = create_lammps_mliap_model(
-        model_path=model_paths[0],
-        do_return_path=True,
-        enable_cueq=input_config.enable_cueq,
-    )
+    if input_config.lammps_pair_style == "mace":
+        compiled_model_path = create_lammps_mace_model(
+            model_path=model_paths[0],
+            do_return_path=True,
+        )
+    else:
+        compiled_model_path = create_lammps_mliap_model(
+            model_path=model_paths[0],
+            do_return_path=True,
+            enable_cueq=input_config.enable_cueq,
+        )
 
     trajectory = run_lammps_from_template(
         lmp_cmd=lammps_path,
@@ -393,7 +498,8 @@ def main(argv: Optional[list] = None) -> None:
         template_file_name=template_file_name,
         logger=logging.getLogger(),
         lammps_args=input_config.lammps_args,
-        model_file=mliap_path,
+        lammps_pair_style=input_config.lammps_pair_style,
+        model_file=compiled_model_path,
         data_file=data_path,
         seed=input_config.seed,
         dump_file=outpath / "md_sampling.dump",
