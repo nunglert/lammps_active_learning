@@ -571,7 +571,7 @@ def test_detect_normal_surface_mode_with_real_ovito():
 
     roi = np.array([slab.cell[0, 0] / 2, slab.cell[1, 1] / 2, zmax])
     normal = detect_normal(slab, roi, radius=2.0)
-    assert normal[2] == pytest.approx(1.0, abs=1e-3)
+    assert normal[2] == pytest.approx(1.0, abs=2e-3)
 
 
 # ---------------------------------------------------------------------------

@@ -13,6 +13,20 @@ the new `## [X.Y.Z] — YYYY-MM-DD`, add a fresh empty `[Unreleased]`, then tag.
 ## [Unreleased]
 
 ### Fixed
+- **`lammps-smoke` failed with `invalid pull policy ([Always]) ... not one of
+  the allowed_pull_policies ([])`.** This runner's Kubernetes executor locks
+  out any per-job `pull_policy` override (`allowed_pull_policies: []`), so
+  `pull_policy: always` on `lammps-smoke`'s `image:` -- added to force past a
+  node-cached, stale `:cpu` tag after a rebuild -- was rejected outright, and
+  removing it would just bring the staleness problem back (the default
+  `IfNotPresent` doesn't know the tag moved). New `resolve-lammps-image` job
+  queries the GitLab Container Registry API (`/registry/repositories`, auth'd
+  via `JOB-TOKEN`) for the `:cpu` tag's current digest and hands it to
+  `lammps-smoke` as `image: $LAMMPS_SMOKE_IMAGE` (a dotenv artifact). Pulling
+  by digest sidesteps the whole problem: a digest is content-addressed, so
+  `IfNotPresent` is correct there -- no forced pull, no runner-admin config
+  change needed.
+
 - **Gave the LAMMPS payload a CPU-testable coupling route, alongside
   (not instead of) the production one.** The production route
   (`pair_style mliap unified`, ML-IAP) needs LAMMPS's ghost-atom

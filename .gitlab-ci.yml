@@ -62,6 +62,52 @@ build-lammps-image:
     - when: manual
   allow_failure: true
 
+# Resolves the ":cpu" tag's current digest and hands it to lammps-smoke as
+# `image: $LAMMPS_SMOKE_IMAGE` (via a dotenv artifact). This exists because
+# this runner's Kubernetes executor has `allowed_pull_policies: []` --
+# `pull_policy: always` on the job's `image:` is unconditionally rejected
+# ("invalid pull policy ... not one of the allowed_pull_policies"), so a
+# forced pull isn't an option here, and the default `IfNotPresent` would
+# happily reuse a node-cached, stale `:cpu` image after a rebuild. Pulling by
+# digest instead of the mutable tag sidesteps the whole problem: a digest is
+# content-addressed, so `IfNotPresent` is *correct* there -- no forced pull
+# needed, and no runner-admin config change either. Runs in every pipeline
+# (`needs: build-lammps-image, optional: true` orders it after a same-pipeline
+# rebuild when one happens) so it always reflects whatever is currently
+# published, not just the pipeline's own build.
+resolve-lammps-image:
+  stage: build
+  image: alpine:3.20
+  needs:
+    - job: build-lammps-image
+      optional: true
+  script:
+    - apk add --no-cache curl jq
+    # Single-quoted (not the multi-line plain-scalar style used elsewhere in
+    # this file): a bare ": " inside "JOB-TOKEN: ${CI_JOB_TOKEN}" is a YAML
+    # mapping separator in a plain scalar, which silently turns the script
+    # line into a YAML mapping instead of a string -- quoting avoids that.
+    - 'REPO_ID=$(curl -sf --header "JOB-TOKEN: ${CI_JOB_TOKEN}" "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/registry/repositories" | jq -r ''.[] | select(.path | endswith("/lammps-mace")) | .id'')'
+    - test -n "${REPO_ID}" || { echo "lammps-mace repository not found in the registry -- has build-lammps-image ever run?"; exit 1; }
+    - 'DIGEST=$(curl -sf --header "JOB-TOKEN: ${CI_JOB_TOKEN}" "${CI_API_V4_URL}/projects/${CI_PROJECT_ID}/registry/repositories/${REPO_ID}/tags/cpu" | jq -r ''.digest'')'
+    - test -n "${DIGEST}" -a "${DIGEST}" != "null" || { echo "no digest for the :cpu tag"; exit 1; }
+    - echo "Resolved lammps-mace:cpu -> ${DIGEST}"
+    - echo "LAMMPS_SMOKE_IMAGE=${CI_REGISTRY_IMAGE}/lammps-mace@${DIGEST}" >> resolve.env
+  artifacts:
+    reports:
+      dotenv: resolve.env
+  # allow_failure: true for the same reason as lammps-smoke below (external
+  # registry dependency, optional tier -- see that job's comment): GitLab
+  # still runs a `needs:`-dependent job when the needed job failed but was
+  # allowed to, so lammps-smoke still starts, just with an empty
+  # $LAMMPS_SMOKE_IMAGE -- a clear "empty image name" error in *its* logs
+  # rather than this job reddening the whole pipeline over an optional tier.
+  allow_failure: true
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH'
+
 variables:
   PIP_DISABLE_PIP_VERSION_CHECK: "1"
   # Full history + tags so setuptools-scm can derive the version (a shallow
@@ -118,24 +164,20 @@ test:
 # without reinstalling the heavy stack, then run only the `lammps` tier.
 #
 # Automatic on every commit now (validated with a real build+run -- see
-# CHANGELOG). Requires `build-lammps-image` to have populated the registry at
-# least once (the image is pulled from $CI_REGISTRY_IMAGE, so the hostname is
-# always correct for this instance); `needs: optional` picks up a
-# same-pipeline rebuild (when the Dockerfile just changed) without failing
-# the job on pipelines where `build-lammps-image` didn't run at all (the
-# normal case -- it reuses the already-published :cpu image).
-# `allow_failure: true` stays on: this tier depends on an external image +
-# registry, so a transient pull/registry hiccup shouldn't block the pipeline.
+# CHANGELOG). `image:` is the digest `resolve-lammps-image` resolved (via its
+# dotenv artifact, consumed as $LAMMPS_SMOKE_IMAGE), not a mutable tag -- see
+# that job's comment for why. `needs: resolve-lammps-image` both supplies
+# that variable and (transitively, through *its* `needs:` on
+# build-lammps-image) picks up a same-pipeline rebuild when the Dockerfile
+# just changed. `allow_failure: true` stays on: this tier depends on an
+# external image + registry, so a transient pull/registry hiccup shouldn't
+# block the pipeline.
 lammps-smoke:
   stage: test
   image:
-    name: ${CI_REGISTRY_IMAGE}/lammps-mace:cpu
-    # Force a fresh pull: :cpu is a mutable tag, and the default IfNotPresent
-    # policy would reuse a node-cached (stale) image after a rebuild.
-    pull_policy: always
+    name: $LAMMPS_SMOKE_IMAGE
   needs:
-    - job: build-lammps-image
-      optional: true
+    - resolve-lammps-image
   allow_failure: true
   before_script:
     - git config --global
