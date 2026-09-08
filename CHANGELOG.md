@@ -37,6 +37,14 @@ the new `## [X.Y.Z] — YYYY-MM-DD`, add a fresh empty `[Unreleased]`, then tag.
   KOKKOS-on-GPU + `"mliap"`. LAMMPS templates
   (`pair_style mliap unified ${model_file} 0` / `pair_coeff * * <species>`)
   now render either route via `{% if lammps_pair_style == "mace" %}`.
+  `build-lammps-image` and `lammps-smoke` (previously `when: manual`) are now
+  automatic: `lammps-smoke` runs on every pipeline (`allow_failure: true`
+  kept, since it depends on an external image/registry); `build-lammps-image`
+  only rebuilds when `docker/Dockerfile.lammps-mace` changes or on a
+  schedule, not on every commit -- rebuilding LAMMPS from source is too heavy
+  to pay on every push. `lammps-smoke` now `needs: [build-lammps-image]`
+  (`optional: true`) so a same-pipeline rebuild is picked up immediately
+  instead of racing the registry push.
 
 ### Added
 - **Tiered testing for the LAMMPS payload, incl. a CI path to a real `lmp`.**

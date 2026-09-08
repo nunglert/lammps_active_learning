@@ -13,14 +13,18 @@
 #      (the latter for the public mace-torch source).
 #   3. Enable this project's Container Registry (Settings -> General ->
 #      Visibility -> Container Registry) and run the `build-lammps-image` job
-#      once, so the `lammps-smoke` job has an image to pull. The registry path
-#      is taken from the predefined $CI_REGISTRY_IMAGE (never hardcode a
-#      registry hostname -- it is instance-specific).
+#      once manually (`when: manual` still fires it on request even outside
+#      its automatic triggers below), so `lammps-smoke` has an image to pull
+#      from its very first automatic run. The registry path is taken from the
+#      predefined $CI_REGISTRY_IMAGE (never hardcode a registry hostname --
+#      it is instance-specific).
 #
 # The main `test` job builds no image (any docker/kubernetes runner works;
-# python:3.13 ships git + compilers for the git-sourced deps). The optional
-# `lammps-smoke` job runs on a prebuilt MACE-LAMMPS image built by
-# `build-lammps-image`.
+# python:3.13 ships git + compilers for the git-sourced deps). `lammps-smoke`
+# runs automatically on every pipeline against the prebuilt MACE-LAMMPS image;
+# `build-lammps-image` itself only (re)builds and pushes that image when
+# `docker/Dockerfile.lammps-mace` changes or on a schedule -- see each job's
+# own comment for the rationale.
 
 stages:
   - build
@@ -28,10 +32,14 @@ stages:
 
 # Build & push the CPU MACE-LAMMPS image (docker/Dockerfile.lammps-mace) to this
 # project's registry with kaniko (no privileged docker needed on k8s runners).
-# Manual: the build is heavy (LAMMPS from source + torch/mace) -- run it once to
-# populate the registry, and again whenever the Dockerfile changes. Building
-# locally and `docker push`ing to $CI_REGISTRY_IMAGE/lammps-mace:cpu works too
-# (and is easier to iterate on while validating the Dockerfile).
+# Automatic, but only when it needs to be: rebuilding LAMMPS from source is
+# heavy (~minutes), so this runs when the Dockerfile itself changes (a commit
+# touching it, on any branch/MR) or on a schedule (catches upstream drift in
+# the pinned LAMMPS/mace-torch sources with nothing in this repo having
+# changed -- same rationale as the top-level `workflow:` scheduled runs).
+# Every other commit reuses the already-published :cpu image untouched.
+# Building locally and `docker push`ing to $CI_REGISTRY_IMAGE/lammps-mace:cpu
+# works too (and is easier to iterate on while validating the Dockerfile).
 build-lammps-image:
   stage: build
   image:
@@ -45,6 +53,12 @@ build-lammps-image:
         --dockerfile "${CI_PROJECT_DIR}/docker/Dockerfile.lammps-mace"
         --destination "${CI_REGISTRY_IMAGE}/lammps-mace:cpu"
   rules:
+    - if: '$CI_PIPELINE_SOURCE == "schedule"'
+    - changes:
+        - docker/Dockerfile.lammps-mace
+    # Manual escape hatch: force a rebuild on an unrelated commit (e.g. to
+    # pick up upstream ACEsuit/lammps or mace-torch changes) without waiting
+    # for the next schedule.
     - when: manual
   allow_failure: true
 
@@ -103,11 +117,15 @@ test:
 # torch (CPU); here we add remote_handler (base, no mace extra) + this package
 # without reinstalling the heavy stack, then run only the `lammps` tier.
 #
-# Requires `build-lammps-image` to have populated the registry first (the image
-# is pulled from $CI_REGISTRY_IMAGE, so the hostname is always correct for this
-# instance). Kept `when: manual` + `allow_failure: true` until the image has
-# been built and validated with one real run; once green, drop both to make it a
-# normal gate.
+# Automatic on every commit now (validated with a real build+run -- see
+# CHANGELOG). Requires `build-lammps-image` to have populated the registry at
+# least once (the image is pulled from $CI_REGISTRY_IMAGE, so the hostname is
+# always correct for this instance); `needs: optional` picks up a
+# same-pipeline rebuild (when the Dockerfile just changed) without failing
+# the job on pipelines where `build-lammps-image` didn't run at all (the
+# normal case -- it reuses the already-published :cpu image).
+# `allow_failure: true` stays on: this tier depends on an external image +
+# registry, so a transient pull/registry hiccup shouldn't block the pipeline.
 lammps-smoke:
   stage: test
   image:
@@ -115,6 +133,9 @@ lammps-smoke:
     # Force a fresh pull: :cpu is a mutable tag, and the default IfNotPresent
     # policy would reuse a node-cached (stale) image after a rebuild.
     pull_policy: always
+  needs:
+    - job: build-lammps-image
+      optional: true
   allow_failure: true
   before_script:
     - git config --global
@@ -155,6 +176,4 @@ lammps-smoke:
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule"'
     - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
-      when: manual
     - if: '$CI_COMMIT_BRANCH'
-      when: manual
