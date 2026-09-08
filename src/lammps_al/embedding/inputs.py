@@ -2,18 +2,19 @@
 
 ``MatrixEmbeddingInput`` and ``EmbeddingAnnealInput`` are the JSON contracts
 between the host-side
-:class:`lammps_al.embedding.sampler.AmorphousEmbeddingSampler` (which writes
-them) and the cluster-side payloads ``scripts/extract.py`` and
+:class:`lammps_al.embedding.extractor.ROIExtractor` /
+:class:`lammps_al.embedding.annealer.EmbeddingAnnealer` (which write them)
+and the cluster-side payloads ``scripts/extract.py`` and
 ``scripts/embedding_anneal.py`` (which load and validate them). They
 subclass ``remote_handler``'s ``ScriptInput`` so they inherit the shared
 ``from_file`` / ``from_dict`` / ``validate`` machinery -- exactly as the
 schemas used when they lived in ``remote_handler.scripts.input_models``.
 
-Kept in this package (not in ``remote_handler``) because the sampler and its
-payloads are a *project* concern: ``remote_handler`` owns the ``Sampler``
-interface and the remote-execution machinery, while the concrete
-amorphous-matrix embedding sampler -- and the input contracts it speaks --
-belongs here.
+Kept in this package (not in ``remote_handler``) because these actors and
+their payloads are a *project* concern: ``remote_handler`` owns the
+``Selector``/``Sampler`` interfaces and the remote-execution machinery,
+while the concrete amorphous-matrix embedding actors -- and the input
+contracts they speak -- belong here.
 """
 
 from __future__ import annotations

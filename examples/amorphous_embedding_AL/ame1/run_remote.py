@@ -1,10 +1,11 @@
 """Example -- amorphous-matrix embedding anneal on a metal/solvent interface.
 
-Demonstrates ``AmorphousEmbeddingSampler``: extract regions of interest (ROIs)
+Demonstrates ``ROIExtractor`` + ``EmbeddingAnnealer``, the two peer actors of
+the amorphous-matrix embedding pipeline: extract regions of interest (ROIs)
 from an uncertainty-tagged MD trajectory, carve an oriented box around each
-ROI, repair the cut boundary, and anneal the mobile shell around the frozen
-ROI with a multi-stage LAMMPS deck driven by a GRACE foundation-model
-potential.
+ROI, repair the cut boundary (``ROIExtractor``), then anneal the mobile
+shell around the frozen ROI with a multi-stage LAMMPS deck driven by a GRACE
+foundation-model potential (``EmbeddingAnnealer``).
 
 The system here is a Cu slab with a water overlayer, so the carved box is
 oriented to the copper surface normal (``topology_mode="interface"``) and the
@@ -14,10 +15,11 @@ pipeline on a homogeneous bulk solid, where several of these interface-only
 pieces (surface-normal detection, an oriented/asymmetric box, molecule-repair
 cleanup, the two-stage split) fall away.
 
-This runs a single sampling step directly against the sampler, not a full
-active-learning loop (see ``ActiveLearningHandler`` for that) -- useful for
-testing/tuning the extract+anneal pipeline in isolation before wiring it into
-a campaign.
+This runs a single extract-then-anneal pass directly against the two
+actors, not a full active-learning loop (see
+``remote_handler.workflows.staged_active_learning.StagedActiveLearningHandler``
+for wiring them -- plus an evaluator/trainer -- into a real campaign) --
+useful for testing/tuning the pipeline in isolation first.
 """
 
 from pathlib import Path
@@ -25,7 +27,8 @@ from pathlib import Path
 from remote_handler.core.cluster_config import ClusterConfig
 from remote_handler.core.file_handler import LocalFileSystem
 
-from lammps_al.embedding.sampler import AmorphousEmbeddingSampler
+from lammps_al.embedding.annealer import EmbeddingAnnealer
+from lammps_al.embedding.extractor import ROIExtractor
 
 local_fs = LocalFileSystem()
 
@@ -53,13 +56,14 @@ anneal_cfg = ClusterConfig(
     conda_env="remote_handler",  # has `remote_handler` + LAMMPS on PATH
 )
 
-sampler = AmorphousEmbeddingSampler(
+# Species/type order shared verbatim between the two actors: the anneal
+# deck fixes LAMMPS type order to this list, so the extractor must write
+# every carved box with the same ordering (via its `specorder` below).
+species = ["Cu", "H", "O"]
+
+extractor = ROIExtractor(
     remote_fs=local_fs,
     cluster_config=extract_cfg,
-    anneal_cluster_config=anneal_cfg,  # anneal_remote_fs defaults to remote_fs
-    # Trajectory that seeds the ROIs; every frame's atoms.arrays must
-    # include a per-atom "uncertainty" array (e.g. force-committee stddev).
-    trajectory_path=Path("inputs/snapshot.xyz"),
     # threshold/cluster_cutoff define the ROIs (regions of interest): atoms
     # with uncertainty >= threshold are seeds, and seeds within
     # cluster_cutoff of each other are merged into a single ROI. One
@@ -75,8 +79,9 @@ sampler = AmorphousEmbeddingSampler(
     # than box_z_below to leave solvent headspace)
     buffer=2.0,  # extra padding added to every carved-cell edge
     protect_radius=4.0,  # radius around the ROI that cleanup never
-    # touches; also the default for
-    # normal_patch_radius/anneal_cutoff below
+    # touches; pass the same value as EmbeddingAnnealer's anneal_cutoff
+    # below and as the default for normal_patch_radius
+    specorder=species,  # must match EmbeddingAnnealer's `species` below
     # How the carved box is oriented before cutting. "interface" builds an
     # OVITO surface mesh (on a copy with remove_species stripped) to find
     # the local surface normal and rotates the box so z points along it.
@@ -90,12 +95,6 @@ sampler = AmorphousEmbeddingSampler(
     # a solvent template built from the ase.build.molecule g2 label below.
     cleanup_mode="molecule",
     solvent="H2O",
-    # LAMMPS/potential setup for the anneal stage.
-    lammps_path="/home/lerhard/micromamba/envs/remote_handler/bin/lmp",
-    pair_style="grace pad_verbose padding 0.1",
-    pair_coeff_path=Path("inputs/final_model"),  # GRACE model dir
-    species=["Cu", "H", "O"],  # LAMMPS type order
-    masses=[63.546, 1.008, 15.999],  # aligned with species
     # Radius (Angstrom) over which nearby surface-mesh facet normals are
     # averaged when picking the interface normal, instead of just using
     # the single nearest facet. Left at None this defaults to
@@ -103,6 +102,22 @@ sampler = AmorphousEmbeddingSampler(
     # (atomic steps/pits) right next to the ROI that would otherwise
     # dominate the single-nearest-facet normal.
     normal_patch_radius=5.0,
+    stub=False,
+)
+
+annealer = EmbeddingAnnealer(
+    remote_fs=local_fs,
+    cluster_config=anneal_cfg,
+    # LAMMPS/potential setup for the anneal stage.
+    lammps_path="/home/lerhard/micromamba/envs/remote_handler/bin/lmp",
+    pair_style="grace pad_verbose padding 0.1",
+    pair_coeff_path=Path("inputs/final_model"),  # GRACE model dir
+    species=species,  # LAMMPS type order -- matches extractor's specorder
+    masses=[63.546, 1.008, 15.999],  # aligned with species
+    anneal_cutoff=4.0,  # frozen fixSphere radius -- matches extractor's
+    # protect_radius above
+    topology_mode="interface",  # only used here to auto-decide
+    # z_wall_epsilon below; matches the extractor's topology_mode
     anneal_stages=[
         {
             "species": ["Cu"],
@@ -135,15 +150,15 @@ sampler = AmorphousEmbeddingSampler(
     roi_repel_wall_cutoff=1.0,
     # Per-stage z-confinement wall, keeping each stage's mobile atoms from
     # drifting into the vacuum/solvent headspace above the interface (there
-    # is headspace here: box_z_above=12.0 > box_z_below=10.0). Only applied
-    # to a stage when its pressure_z is unset -- the Cu stage above has no
-    # pressure_z, so it gets this wall; the H/O stage already barostats z
-    # via its own pressure_z, so a static wall would fight that box
-    # rescaling and is skipped for it automatically. z_wall_epsilon is left
-    # unset: it defaults to 10.0 here because topology_mode="interface"
-    # (a free surface implies possible headspace); it would auto-default to
-    # 0.0/disabled for topology_mode="bulk", where there's no vacuum to
-    # drift into.
+    # is headspace here: box_z_above=12.0 > box_z_below=10.0 on the
+    # extractor). Only applied to a stage when its pressure_z is unset --
+    # the Cu stage above has no pressure_z, so it gets this wall; the H/O
+    # stage already barostats z via its own pressure_z, so a static wall
+    # would fight that box rescaling and is skipped for it automatically.
+    # z_wall_epsilon is left unset: it defaults to 10.0 here because
+    # topology_mode="interface" (a free surface implies possible
+    # headspace); it would auto-default to 0.0/disabled for
+    # topology_mode="bulk", where there's no vacuum to drift into.
     #
     # These two are the deck-wide default, used by any stage that doesn't
     # set its own z_wall_margin/z_wall_epsilon/z_wall_cutoff keys inside its
@@ -160,6 +175,11 @@ sampler = AmorphousEmbeddingSampler(
 calcdir = Path("results/iteration_0")  # collected locally, next to this script
 calcdir.mkdir(parents=True, exist_ok=True)
 
-sampler.update(calcdir)
-output_path = sampler.get_sampled_configs()
+# Trajectory that seeds the ROIs; every frame's atoms.arrays must include a
+# per-atom "uncertainty" array (e.g. force-committee stddev).
+extractor.update(calcdir, Path("inputs/snapshot.xyz"))
+extracted = extractor.get_selected_configs()
+
+annealer.update(calcdir, extracted)
+output_path = annealer.get_sampled_configs()
 print(f"Annealed configurations written to {output_path}")
