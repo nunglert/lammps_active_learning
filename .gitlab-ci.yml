@@ -20,7 +20,9 @@
 #      it is instance-specific).
 #
 # The main `test` job builds no image (any docker/kubernetes runner works;
-# python:3.13 ships git + compilers for the git-sourced deps). `lammps-smoke`
+# python:3.13 ships git + compilers for the git-sourced deps, plus an
+# apt-installed cmake for pyace's CMake-built extension -- see that job's
+# before_script). `lammps-smoke`
 # runs automatically on every pipeline against the prebuilt MACE-LAMMPS image;
 # `build-lammps-image` itself only (re)builds and pushes that image when
 # `docker/Dockerfile.lammps-mace` changes or on a schedule -- see each job's
@@ -149,9 +151,15 @@ test:
         url."https://gitlab-ci-token:${CI_JOB_TOKEN}@gitlab.tuwien.ac.at/".insteadOf
         "ssh://git@gitlab.tuwien.ac.at/"
     - python -V
+    # cmake: remote_handler's [ace] extra (pulled in by [run] below) installs
+    # pyace (git+https://github.com/ICAMS/python-ace.git), which builds a
+    # C++/Cython extension via CMake at install time -- not preinstalled on
+    # plain python:3.13.
+    - apt-get update && apt-get install -y --no-install-recommends cmake
     - pip install --upgrade pip
-    # Full install: remote_handler (GitLab) + its mace stack (public GitHub) +
-    # dev. Heavy (torch/mace), but the resolve is the cross-host check.
+    # Full install: remote_handler (GitLab) + its mace/ace/grace stacks (public
+    # GitHub/PyPI) + dev. Heavy (torch/mace), but the resolve is the cross-host
+    # check.
     - pip install ".[all]"
     - python -c "import lammps_al; from lammps_al.run.sampler import LammpsSampler; print('install OK')"
   script:
