@@ -28,19 +28,26 @@ dependencies = [
 readme = "README.md"
 
 [project.optional-dependencies]
-# Run side: the host-side sampler needs remote_handler; the cluster conda env
-# that runs the shipped payload additionally needs a MACE stack (mace-torch +
-# cuequivariance, via remote_handler's [mace_freeze] extra), torch, and a
-# LAMMPS build with the MLIAP/MACE interface. Installing this on the cluster
-# also brings lammps_al itself (for the LammpsSamplingInput schema).
 run = [
-    "remote_handler[dev,mace_freeze,ace,grace] @ git+ssh://git@gitlab.tuwien.ac.at/e165-03-1_theoretische_materialchemie/madsen-s-research-group/remote_handler.git@dev-NU",
+    "remote_handler[dev] @ git+ssh://git@gitlab.tuwien.ac.at/e165-03-1_theoretische_materialchemie/madsen-s-research-group/remote_handler.git@dev-NU",
 ]
-# OVITO, for interface/surface-normal detection in the amorphous-matrix
-# embedding payload (lammps_al.embedding.scripts.surface_mesh). Only needed
-# on the remote env running scripts/extract.py with topology_mode in
-# {"surface", "interface"}; "bulk" mode needs no OVITO, and the fallback
-# species-COM heuristic is used if this extra is absent.
+ace = [
+    "remote_handler[ace] @ git+ssh://git@gitlab.tuwien.ac.at/e165-03-1_theoretische_materialchemie/madsen-s-research-group/remote_handler.git@dev-NU",
+]
+grace = [
+    "remote_handler[grace] @ git+ssh://git@gitlab.tuwien.ac.at/e165-03-1_theoretische_materialchemie/madsen-s-research-group/remote_handler.git@dev-NU",
+]
+mace = [
+    "remote_handler[mace_freeze] @ git+ssh://git@gitlab.tuwien.ac.at/e165-03-1_theoretische_materialchemie/madsen-s-research-group/remote_handler.git@dev-NU",
+]
+# GPU-accelerated ACE fitting (pacemaker's `tensorpot` backend via the
+# *old*, pre-GRACE-rename tensorpotential API -- see remote_handler's own
+# [ace_tensorpot_gpu] extra comment. Install in its
+# own dedicated environment -- mutually exclusive with [grace] (see above).
+# Deliberately NOT included in [all], for the same reason.
+ace_tensorpot_gpu = [
+    "remote_handler[ace_tensorpot_gpu] @ git+ssh://git@gitlab.tuwien.ac.at/e165-03-1_theoretische_materialchemie/madsen-s-research-group/remote_handler.git@dev-NU",
+]
 embedding = [
     "ovito"
 ]
@@ -49,8 +56,11 @@ dev = [
     "pytest-cov",
     "pre-commit",
 ]
+# The sensible default bundle -- every committee backend except
+# [ace_tensorpot_gpu], which needs its own dedicated environment and would
+# conflict with [grace] here (see that extra's comment above).
 all = [
-    "lammps_active_learning[dev,run,embedding]"
+    "lammps_active_learning[dev,run,ace,grace,mace,embedding]"
 ]
 
 [tool.setuptools_scm]

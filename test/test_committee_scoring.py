@@ -8,9 +8,11 @@ the annotated full trajectory. This needs the MACE stack (``[run]`` extra)
 and a couple of committee models, but **no LAMMPS binary and no GPU**; it
 self-skips when either is missing. The ``lmp`` half is covered separately
 (``test_lammps_integration.py``, the ``lammps`` tier). The ``ace``/``grace``
-dispatch branches in ``_build_committee_calculator`` are not exercised here
--- they need ``pyace``/``tensorpotential`` installed, which no test tier
-currently pulls in.
+dispatch branches in ``_build_committee_calculator`` are covered against fake
+stand-in calculators in ``test_payload_unit.py`` (no real tiny trained
+ACE/GRACE committee potentials exist yet to do what this file does for MACE
+with the real ``pyace``/``tensorpotential`` libraries -- promote those tests
+once such potentials are available).
 
 The committee models are borrowed from ``examples/mace_md_AL`` (Cu/Co/H); the
 LAMMPS dump is synthesized here so no dump fixture needs shipping.
