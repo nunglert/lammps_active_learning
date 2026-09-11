@@ -33,19 +33,19 @@ import sys
 from pathlib import Path
 
 import ase.io
-
 from remote_handler.core.cluster_handler import ClusterConfig
-from remote_handler.core.file_handler import RemoteFileSystem, LocalFileSystem
+from remote_handler.core.file_handler import LocalFileSystem, RemoteFileSystem
 from remote_handler.scripts import input_models
-from remote_handler.workflows.evaluators import VASPEvaluator
-from remote_handler.workflows.staged_active_learning import StagedActiveLearningHandler
-from remote_handler.workflows.trainers import MaceModelTrainer
 from remote_handler.workflows import active_learning_base
+from remote_handler.workflows.evaluators import VASPEvaluator
 from remote_handler.workflows.selectors import PipelineSelector, RandomSelector
+from remote_handler.workflows.staged_active_learning import (
+    StagedActiveLearningHandler,
+)
+from remote_handler.workflows.trainers import MaceModelTrainer
 from swieser_scripts.utils.dft_utils import get_settings_from_structure
 
 from lammps_al.run.sampler import LammpsSampler
-from lammps_al.run.scripts import script_dir
 
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 
@@ -54,7 +54,6 @@ logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 # ---------------------------------------------------------------------------
 calchome = Path(__file__).parent.resolve()
 rh_scripts_dir = Path(input_models.__file__).parent
-lammps_scripts_dir = script_dir()
 cluster_config_dir = Path(os.environ["REMOTE_HANDLER_CONFIG_DIR"])
 template_dir = Path(os.environ["REMOTE_HANDLER_SLURM_TEMPLATES"])
 inputs_dir = calchome / "inputs"
@@ -75,7 +74,7 @@ DIRONA_CONDA = "/home/swieser/micromamba/"
 EVALUATOR_DIR = "/home/swieser/cellar/STO_AL_production/STO_eval_dir"
 TRAIN_DIR = "/share/theochem/sandro.wieser/STO_training/MD_train_dir"
 SAMPLING_DIR = "/share/theochem/sandro.wieser/STO_training/MD_sample_dir"
-MACE_TRAIN_SCRIPT = "mace_run_train" 
+MACE_TRAIN_SCRIPT = "mace_run_train"
 
 # number of structures to sample each iteration
 NUM_SAMPLE = 20
@@ -98,7 +97,9 @@ gpu_cluster_config_a40 = ClusterConfig.from_file(
 )
 gpu_cluster_config_a40.savepath = TRAIN_DIR
 
-dft_cluster_config = ClusterConfig.from_file(cluster_config_dir / "dirona.json")
+dft_cluster_config = ClusterConfig.from_file(
+    cluster_config_dir / "dirona.json"
+)
 dft_cluster_config.savepath = EVALUATOR_DIR
 
 
@@ -116,7 +117,9 @@ initial_config = calchome / "inputs" / "config" / "poscar.lmp"
 
 selector = PipelineSelector(
     [
-        RandomSelector(n_configs=NUM_SAMPLE,),
+        RandomSelector(
+            n_configs=NUM_SAMPLE,
+        ),
     ]
 )
 
@@ -126,7 +129,6 @@ lammps_sampler = LammpsSampler(
     cluster_config=gpu_cluster_config_a100s,
     element_mapping={1: "O", 2: "Sr", 3: "Ti"},
     data_path=initial_config,
-    sampling_script=lammps_scripts_dir / "lammps_dump_sampling.py",
     remote_savepath=Path(SAMPLING_DIR),
     loop_time=30,
 )
@@ -152,7 +154,7 @@ vasp_evaluator = VASPEvaluator(
     loop_time=30,
     required_fraction=0.5,
     incar_kwargs=settings,
-    slurm_header_add="", # I put everything in the template
+    slurm_header_add="",  # I put everything in the template
 )
 
 
@@ -177,11 +179,12 @@ mace_trainer = MaceModelTrainer(
 # ---------------------------------------------------------------------------
 
 
-
 class SamplerSchedule(active_learning_base.Schedule):
-
     def __init__(
-        self, num_iterations: int, starting_temperature: float, temperature_step: float
+        self,
+        num_iterations: int,
+        starting_temperature: float,
+        temperature_step: float,
     ):
         self.temperature = starting_temperature
         self.temperature_step = temperature_step
@@ -193,7 +196,7 @@ class SamplerSchedule(active_learning_base.Schedule):
             "temperature": temperature,
             "timestep": 0.001,
             "n_run": 10000,
-            "sampling_frequency": 1,
+            "dump_frequency": 1,
         }
         return kwargs
 

@@ -73,8 +73,12 @@ def build_campaign_entries(calchome, progress, *, datapath) -> list:
     )
     iterations = list(range(n_iterations))
     return [
-        UncertaintyTrendPanel(calchome, iterations, datapath=datapath),
-        UncertaintyDepthProfilePanel(calchome, iterations, datapath=datapath),
+        UncertaintyTrendPanel(
+            calchome, progress, iterations, datapath=datapath
+        ),
+        UncertaintyDepthProfilePanel(
+            calchome, progress, iterations, datapath=datapath
+        ),
     ]
 
 

@@ -8,6 +8,7 @@ need no committee at all -- they read per-atom ``uncertainty`` arrays
 directly off synthetic sampler trajectories.
 """
 
+import json
 from pathlib import Path
 
 import numpy as np
@@ -24,6 +25,7 @@ pytest.importorskip("alviz.dashboard")
 
 from alviz.dashboard import Dashboard  # noqa: E402
 
+from lammps_al.dashboard import run_layout  # noqa: E402
 from lammps_al.dashboard.panels.committee_parity import (  # noqa: E402
     CommitteeParityPanel,
     HeldOutParityPanel,
@@ -203,8 +205,14 @@ def test_species_force_parity_panel_missing_species_gets_none(
 # UncertaintyTrendPanel / UncertaintyDepthProfilePanel
 # ---------------------------------------------------------------------------
 def _write_uncertainty_traj(calchome, it, frames):
-    """frames: list of (positions_z_for_Cu_H_O_triplet, uncertainties)."""
-    out = calchome / str(it) / "sample" / "results" / "out"
+    """frames: list of (positions_z_for_Cu_H_O_triplet, uncertainties).
+
+    Writes to ``uncertainty_select_output/`` (CommitteeUncertaintySelector's
+    recorded, annotated-but-not-reduced output) and merges an
+    ``AL_progress.json`` entry for it, so ``run_layout.load_progress``
+    resolves the path -- mirrors the real ring's on-disk shape.
+    """
+    out = calchome / "uncertainty_select_output"
     out.mkdir(parents=True, exist_ok=True)
     configs = []
     for z_positions, uncertainties in frames:
@@ -216,7 +224,17 @@ def _write_uncertainty_traj(calchome, it, frames):
         )
         atoms.arrays["uncertainty"] = np.asarray(uncertainties)
         configs.append(atoms)
-    ase_io.write(out / "traj+uncertainties.xyz", configs)
+    rel = f"uncertainty_select_output/u_it{it}_0.extxyz"
+    ase_io.write(out / f"u_it{it}_0.extxyz", configs)
+
+    progress_file = calchome / "AL_progress.json"
+    data = (
+        json.loads(progress_file.read_text())
+        if progress_file.exists()
+        else {"stages": ["uncertainty_select"], "outputs": {}}
+    )
+    data["outputs"].setdefault("uncertainty_select", {})[str(it)] = [rel]
+    progress_file.write_text(json.dumps(data))
 
 
 def test_uncertainty_trend_panel(tmp_path):
@@ -225,8 +243,11 @@ def test_uncertainty_trend_panel(tmp_path):
     _write_uncertainty_traj(
         calchome, 1, [([0.0, 1.0, 2.0], [0.01, 0.02, 0.03])]
     )
+    progress = run_layout.load_progress(calchome)
 
-    panel = UncertaintyTrendPanel(calchome, [0, 1], datapath=tmp_path)
+    panel = UncertaintyTrendPanel(
+        calchome, progress, [0, 1], datapath=tmp_path
+    )
     board = Dashboard(1, 1, fail_silently=False)
     board.register_entry(panel, ("0", "0"))
     board.allocate_panels()
@@ -242,8 +263,11 @@ def test_uncertainty_trend_panel(tmp_path):
 def test_uncertainty_trend_panel_skips_missing_iterations(tmp_path):
     calchome = tmp_path / "calchome"
     _write_uncertainty_traj(calchome, 0, [([0.0, 1.0, 2.0], [0.1, 0.1, 0.1])])
+    progress = run_layout.load_progress(calchome)
 
-    panel = UncertaintyTrendPanel(calchome, [0, 1, 2], datapath=tmp_path)
+    panel = UncertaintyTrendPanel(
+        calchome, progress, [0, 1, 2], datapath=tmp_path
+    )
     data = panel.compute_data({})
 
     assert data.iterations == [0]
@@ -252,7 +276,11 @@ def test_uncertainty_trend_panel_skips_missing_iterations(tmp_path):
 def test_uncertainty_trend_panel_no_data_raises(tmp_path):
     calchome = tmp_path / "calchome"
     calchome.mkdir()
-    panel = UncertaintyTrendPanel(calchome, [0], datapath=tmp_path)
+    (calchome / "AL_progress.json").write_text(
+        json.dumps({"stages": [], "outputs": {}})
+    )
+    progress = run_layout.load_progress(calchome)
+    panel = UncertaintyTrendPanel(calchome, progress, [0], datapath=tmp_path)
     with pytest.raises(ValueError):
         panel.compute_data({})
 
@@ -261,11 +289,13 @@ def test_uncertainty_depth_profile_panel_bins_by_depth(tmp_path):
     calchome = tmp_path / "calchome"
     # Cu at z=0 (interface z0=0); H at z=-5 (inside slab); O at z=5 (in water).
     _write_uncertainty_traj(calchome, 0, [([0.0, -5.0, 5.0], [0.0, 0.5, 1.0])])
+    progress = run_layout.load_progress(calchome)
 
     # bin_width=2.0 puts depth=-5.0/+5.0 exactly on bin centers (-9,-7,-5,
     # -3,-1,1,3,5,7,9), avoiding ambiguous edge-of-bin assignment.
     panel = UncertaintyDepthProfilePanel(
         calchome,
+        progress,
         [0],
         depth_range=(-10.0, 10.0),
         bin_width=2.0,
@@ -293,10 +323,15 @@ def test_uncertainty_depth_profile_panel_no_interface_species_skipped(
 ):
     calchome = tmp_path / "calchome"
     _write_uncertainty_traj(calchome, 0, [([0.0, 1.0, 2.0], [0.1, 0.2, 0.3])])
+    progress = run_layout.load_progress(calchome)
 
     # interface_species="Ag" never appears -- frame has no interface atoms.
     panel = UncertaintyDepthProfilePanel(
-        calchome, [0], interface_species=("Ag",), datapath=tmp_path
+        calchome,
+        progress,
+        [0],
+        interface_species=("Ag",),
+        datapath=tmp_path,
     )
     with pytest.raises(ValueError):
         panel.compute_data({})

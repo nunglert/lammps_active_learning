@@ -1,9 +1,10 @@
 """Committee-disagreement (uncertainty) diagnostics across AL iterations.
 
-Both panels read the raw, uncollected sampler trajectories directly (see
-``run_layout.sampler_uncertainty_trajectory``) -- this is where the full
-per-atom committee-disagreement signal lives; ``sampler_output/`` only ever
-holds the ``num_samples`` peak-uncertainty frames.
+Both panels read ``uncertainty_select_output`` (see
+``run_layout.sampler_uncertainty_trajectory``) -- ``CommitteeUncertaintySelector``
+annotates without reducing, so this is the full per-atom committee-
+disagreement signal for every frame the sampler produced;
+``sampler_output/`` itself holds the raw, un-annotated MD trajectory.
 """
 
 from __future__ import annotations
@@ -38,6 +39,8 @@ class UncertaintyTrendPanel(Entry):
 
     Args:
         calchome: The campaign's ``calchome`` directory.
+        progress: Normalized per-iteration progress list (from
+            ``run_layout.load_progress``).
         iterations: Iteration indices to include (missing/unfinished ones
             are silently skipped, not errored).
         low_pct / high_pct: Percentile band to shade.
@@ -47,10 +50,18 @@ class UncertaintyTrendPanel(Entry):
     data_class = UncertaintyTrendData
 
     def __init__(
-        self, calchome, iterations, *args, low_pct=10, high_pct=90, **kwargs
+        self,
+        calchome,
+        progress,
+        iterations,
+        *args,
+        low_pct=10,
+        high_pct=90,
+        **kwargs,
     ):
         super().__init__(*args, **kwargs)
         self._calchome = calchome
+        self._progress = progress
         self._iterations = list(iterations)
         self._low_pct = low_pct
         self._high_pct = high_pct
@@ -65,7 +76,7 @@ class UncertaintyTrendPanel(Entry):
         iterations, means, lows, highs = [], [], [], []
         for it in self._iterations:
             traj_path = run_layout.sampler_uncertainty_trajectory(
-                self._calchome, it
+                self._calchome, self._progress, it
             )
             if traj_path is None:
                 continue
@@ -127,6 +138,8 @@ class UncertaintyDepthProfilePanel(Entry):
 
     Args:
         calchome: The campaign's ``calchome`` directory.
+        progress: Normalized per-iteration progress list (from
+            ``run_layout.load_progress``).
         iterations: Iteration indices to include.
         interface_species: Species whose mean z estimates the interface
             height (default ``("Cu",)``).
@@ -143,6 +156,7 @@ class UncertaintyDepthProfilePanel(Entry):
     def __init__(
         self,
         calchome,
+        progress,
         iterations,
         *args,
         interface_species=("Cu",),
@@ -152,6 +166,7 @@ class UncertaintyDepthProfilePanel(Entry):
     ):
         super().__init__(*args, **kwargs)
         self._calchome = calchome
+        self._progress = progress
         self._iterations = list(iterations)
         self._interface_species = set(interface_species)
         self._depth_range = depth_range
@@ -178,7 +193,7 @@ class UncertaintyDepthProfilePanel(Entry):
         used_iterations = []
         for it in self._iterations:
             traj_path = run_layout.sampler_uncertainty_trajectory(
-                self._calchome, it
+                self._calchome, self._progress, it
             )
             if traj_path is None:
                 continue

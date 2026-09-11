@@ -4,8 +4,8 @@ pacemaker produces no portable prediction bundle (only the ``.yaml``
 potential per committee member), so parity data must come from *re-scoring*
 reference configs with the trained committee, not from reading a
 pre-computed bundle. ``pyace.PyACEEnsembleCalculator`` already does exactly
-this, and ``lammps_al``'s own sampler already builds one via
-``_build_committee_calculator`` for uncertainty scoring -- this module
+this, and ``lammps_al``'s own committee-selection payload already builds one
+via ``_build_committee_calculator`` for uncertainty scoring -- this module
 reuses that directly rather than inventing a second pyace-loading path.
 """
 
@@ -23,7 +23,7 @@ def _default_committee_calculator(model_files, device: str = "cpu"):
     panels that don't touch committee predictions (uncertainty/spatial
     panels) never require it installed.
     """
-    from lammps_al.run.scripts.lammps_sampling import (
+    from lammps_al.select.scripts.committee_selection import (
         _build_committee_calculator,
     )
 

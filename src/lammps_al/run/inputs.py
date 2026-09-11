@@ -15,7 +15,7 @@ MD-uncertainty sampler -- and the input contract it speaks -- belongs here.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar, Optional
 
@@ -27,6 +27,16 @@ from remote_handler.scripts.input_models import ScriptInput, _require_path
 class LammpsSamplingInput(ScriptInput):
     """Input configuration for ``scripts/lammps_sampling.py``.
 
+    This is the *MD-only* half of the sampling contract: it runs one LAMMPS
+    trajectory and writes a proper ``trajectory.extxyz`` (correct chemical
+    symbols applied via ``element_mapping``). Committee-uncertainty scoring
+    and peak-frame selection is a separate actor/contract --
+    ``lammps_al.select.selector.CommitteeUncertaintySelector`` /
+    ``lammps_al.select.inputs.CommitteeSelectionInput`` -- split out so
+    "generate dynamics" and "pick the most informative configs" are two
+    loop roles, not one (mirroring this repo's existing
+    ``ROIExtractor``/``EmbeddingAnnealer`` split).
+
     Attributes:
         lammps_path: Path to LAMMPS executable
         template_file: Name of LAMMPS input template file
@@ -34,11 +44,12 @@ class LammpsSamplingInput(ScriptInput):
         model_files: List of paths to the committee's model files. Format
             depends on ``backend``: MACE ``.model`` files, an ACE
             pacemaker ``.yaml``/``.yace`` file per member, or a GRACE
-            gracemaker model directory per member.
-        element_mapping: Dict mapping atom numbers to element symbols
-        cutoff_radius: Cutoff radius for local uncertainty aggregation
-            (Angstrom)
-        bin_count: Number of trajectory segments for sampling
+            gracemaker model directory per member. Only ``model_files[0]``
+            drives the MD here (the rest of the committee is only needed
+            for scoring, downstream).
+        element_mapping: Dict mapping atom numbers to element symbols,
+            applied when converting the raw LAMMPS dump to
+            ``out/trajectory.extxyz``.
         seed: Random seed for LAMMPS
         lammps_config_name: Name for generated LAMMPS input file
             (default: "lammps.in")
@@ -47,13 +58,16 @@ class LammpsSamplingInput(ScriptInput):
             back to every step (dump_frequency=1) at render time -- fine
             for small systems, but for large ones (hundreds of thousands of
             atoms) this can produce a huge dump file in minutes; set
-            explicitly for those. Deliberately a distinct name from
-            ``LammpsSampler``'s pre-existing ``sampling_frequency`` (a
-            different concept for ``lammps_dump_sampling.py``'s payload,
-            mutually exclusive with ``num_samples`` there) -- reusing that
-            name here collided with that exclusion logic and got silently
-            dropped whenever ``num_samples`` was also set, confirmed as the
-            cause of an unexpectedly large dump file, 2026-09-11.
+            explicitly for those.
+        extra_template_kwargs: Arbitrary extra jinja2 render kwargs (e.g. a
+            ``Schedule``'s ``temperature``/``timestep``/``n_run``),
+            forwarded to the template verbatim alongside the fixed ones
+            ``main()`` always sets. Populated by
+            ``LammpsSampler.update()`` from any ``update(**kwargs)`` key
+            that isn't one of this dataclass's own named fields, instead of
+            being silently dropped as an "unknown key" (the same class of
+            bug that once ate a ``dump_frequency`` override under the old,
+            colliding ``sampling_frequency`` name).
 
     Example:
         >>> config = LammpsSamplingInput.from_file(Path("input.json"))
@@ -67,8 +81,6 @@ class LammpsSamplingInput(ScriptInput):
     data_file: str
     model_files: list[str]
     element_mapping: dict[str, str]
-    cutoff_radius: float
-    bin_count: int
     seed: int
     lammps_config_name: str = "lammps.in"
     # LAMMPS accelerator/package flags inserted between ``-in`` and ``-log``.
@@ -77,8 +89,6 @@ class LammpsSamplingInput(ScriptInput):
     # run a CPU-only build, e.g. in CI -- lammps_pair_style="mace" needs no
     # flags at all on CPU.
     lammps_args: str = "-k on g 1 -sf kk -pk kokkos newton on neigh half"
-    # torch device for the MACE committee scoring ("cuda" or "cpu").
-    device: str = "cuda"
     # Which LAMMPS/MACE coupling to compile the driving model for and render
     # into the template (as {{ lammps_pair_style }}):
     #   "mliap" (default, production): the ML-IAP Python bridge
@@ -97,8 +107,7 @@ class LammpsSamplingInput(ScriptInput):
     # without the cuequivariance requirement (CPU builds); unused by
     # backend="ace"/"grace".
     enable_cueq: bool = True
-    # Which committee-potential family drives both the MD and the
-    # uncertainty scoring:
+    # Which committee-potential family drives the MD:
     #   "mace" (default): see lammps_pair_style above for the mliap/mace
     #     compile-route choice.
     #   "ace": pacemaker-fit ACE potentials (.yaml/.yace). LAMMPS's native
@@ -109,12 +118,12 @@ class LammpsSamplingInput(ScriptInput):
     #     member). LAMMPS's native `pair_style grace` reads the directory
     #     directly -- no compile step. `lammps_pair_style` becomes the
     #     literal pair_style line (e.g. "grace pad_verbose padding 0.1").
-    # Committee uncertainty scoring dispatches per backend in
-    # lammps_sampling.py: MACE's `MACECalculator` (forces_comm, stdev
-    # computed here), ACE's `PyACEEnsembleCalculator`, or GRACE's
-    # `TPCalculator` (both already return an aggregated `forces_std`).
+    # Only affects the MD's driving potential here; committee-uncertainty
+    # scoring (which also dispatches on this field) lives in
+    # lammps_al.select.scripts.committee_selection.
     backend: str = "mace"
     dump_frequency: Optional[int] = None
+    extra_template_kwargs: dict = field(default_factory=dict)
 
     def validate(self, root: Optional[Path] = None) -> None:
         """Validate configuration parameters.
@@ -130,24 +139,9 @@ class LammpsSamplingInput(ScriptInput):
         if not self.model_files:
             raise ScriptInputError("model_files cannot be empty")
 
-        if self.cutoff_radius <= 0:
-            raise ScriptInputError(
-                f"cutoff_radius must be positive, got {self.cutoff_radius}"
-            )
-
-        if self.bin_count <= 0:
-            raise ScriptInputError(
-                f"bin_count must be positive, got {self.bin_count}"
-            )
-
         if self.dump_frequency is not None and self.dump_frequency <= 0:
             raise ScriptInputError(
                 f"dump_frequency must be positive, got {self.dump_frequency}"
-            )
-
-        if self.device not in ("cpu", "cuda"):
-            raise ScriptInputError(
-                f"device must be 'cpu' or 'cuda', got {self.device!r}"
             )
 
         if self.backend not in ("mace", "ace", "grace"):

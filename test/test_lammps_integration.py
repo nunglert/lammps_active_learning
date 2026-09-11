@@ -10,9 +10,11 @@ this tier locally (see that Dockerfile's header for the `docker run`
 invocation).
 
 It drives the payload's ``main`` on CPU over a tiny system for a handful of MD
-steps and asserts a non-empty ``out/samples.xyz`` is produced -- proving the
-compile -> run -> committee-score -> select pipeline holds together. The
-numerics are not asserted (a 5-step CPU run is a functional smoke test).
+steps and asserts a non-empty ``out/trajectory.extxyz`` is produced -- proving
+the compile -> run -> convert pipeline holds together (this payload is
+MD-only now; committee scoring is a separate payload/stage, see
+``test_committee_scoring.py``). The numerics are not asserted (a 5-step CPU
+run is a functional smoke test).
 
 Explicitly requests ``lammps_pair_style="mace"`` (LAMMPS's native
 ``pair_style mace``, the ``ML-MACE`` package): unlike the default
@@ -85,8 +87,6 @@ def test_full_payload_smoke(tmp_path):
         "model_files": model_names,
         "lammps_config_name": "lammps.in",
         "element_mapping": _ELEMENT_MAPPING,
-        "cutoff_radius": 4.0,
-        "bin_count": 2,
         "seed": 12345,
         "lammps_args": _CPU_LAMMPS_ARGS,
         "device": "cpu",
@@ -97,12 +97,15 @@ def test_full_payload_smoke(tmp_path):
 
     payload.main([None, str(input_file)])
 
-    # The job wrote its success marker and a non-empty candidate set.
+    # The job wrote its success marker and a non-empty trajectory.
     assert (calc / "is_finished.info").exists()
-    samples = calc / "out" / "samples.xyz"
-    assert samples.exists()
+    trajectory = calc / "out" / "trajectory.extxyz"
+    assert trajectory.exists()
 
     import ase.io
 
-    selected = ase.io.read(samples, index=":")
-    assert len(selected) == config["bin_count"]
+    frames = ase.io.read(trajectory, index=":")
+    assert len(frames) > 0
+    assert set(frames[0].get_chemical_symbols()) <= set(
+        _ELEMENT_MAPPING.values()
+    )

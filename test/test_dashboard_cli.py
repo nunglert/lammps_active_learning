@@ -76,7 +76,8 @@ def two_iteration_calchome(tmp_path):
 
     # Iteration 1: 2 more committee members + evaluated configs (cumulative
     # over iteration 0's, so new_evaluator_configs_for_iteration exercises
-    # the cumulative-detection branch) + a raw uncertainty trajectory.
+    # the cumulative-detection branch) + a recorded, annotated (not
+    # reduced) uncertainty trajectory.
     for i in range(2):
         (calchome / "trainer_output" / f"trainer_it1_{i}.yaml").write_text(
             "potential"
@@ -93,8 +94,7 @@ def two_iteration_calchome(tmp_path):
         calchome / "evaluator_output" / "evaluator_it1_0.extxyz", configs1
     )
 
-    out = calchome / "1" / "sample" / "results" / "out"
-    out.mkdir(parents=True)
+    (calchome / "uncertainty_select_output").mkdir(parents=True)
     traj_atoms = []
     for z in (0.0, 1.0, 2.0):
         atoms = Atoms(
@@ -105,13 +105,17 @@ def two_iteration_calchome(tmp_path):
         )
         atoms.arrays["uncertainty"] = np.array([0.1, 0.1, 0.1])
         traj_atoms.append(atoms)
-    ase_io.write(out / "traj+uncertainties.xyz", traj_atoms)
+    ase_io.write(
+        calchome / "uncertainty_select_output" / "u_it1_0.extxyz",
+        traj_atoms,
+    )
 
     (calchome / "AL_progress.json").write_text(
         json.dumps(
             {
                 "stages": [
                     "sampler",
+                    "uncertainty_select",
                     "selector",
                     "annealer",
                     "evaluator",
@@ -130,6 +134,9 @@ def two_iteration_calchome(tmp_path):
                     },
                     "evaluator": {
                         "1": ["evaluator_output/evaluator_it1_0.extxyz"]
+                    },
+                    "uncertainty_select": {
+                        "1": ["uncertainty_select_output/u_it1_0.extxyz"]
                     },
                 },
             }

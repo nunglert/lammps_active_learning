@@ -17,27 +17,29 @@ then iteration)::
 
 is pivoted to one internal per-iteration list of ``{<stage>_output: [rel,
 ...]}`` dicts, exactly like ``jaxrens_al``'s bridge -- just generalized to
-this campaign's 5 stages (``jaxrens_al``'s classic 4-stage AL ring has no
-``annealer``).
+this campaign's 6 stages (``jaxrens_al``'s classic 4-stage AL ring has
+neither ``uncertainty_select`` nor ``annealer``).
 
 Layout::
 
     calchome/
-    ├── 0/  1/  ...                 # per-iteration actor working dirs
-    ├── sampler_output/             # sampled/candidate configs (uncertainty-tagged)
-    ├── selector_output/            # ROI-carved boxes the selector chose
-    ├── annealer_output/            # annealed configs sent for DFT
-    ├── evaluator_output/           # DFT-labelled configs (REF_energy/REF_forces)
-    ├── trainer_output/             # trained committee-member potentials
+    ├── 0/  1/  ...                    # per-iteration actor working dirs
+    ├── sampler_output/                # raw MD trajectories (no uncertainty yet)
+    ├── uncertainty_select_output/     # whole trajectory, annotated (not reduced)
+    ├── selector_output/               # ROI-carved boxes the selector chose
+    ├── annealer_output/               # annealed configs sent for DFT
+    ├── evaluator_output/              # DFT-labelled configs (REF_energy/REF_forces)
+    ├── trainer_output/                # trained committee-member potentials
     └── AL_progress.json
 
-Some artifacts are never recorded in ``AL_progress.json`` at all -- the full
-per-atom uncertainty trajectory (only the peak-uncertainty frames make it
-into ``sampler_output/``) and the selector's ROI manifest. Those are reached
-into directly, by the raw per-iteration working-dir convention (confirmed
-from ``remote_handler``'s ``origin/dev-NU`` source): ``calchome/{it}/sample/
-results/out/traj+uncertainties.xyz`` and ``calchome/{it}/extract/out/
-manifest.json``.
+One artifact is never recorded in ``AL_progress.json`` at all -- the
+selector's ROI manifest -- reached into directly, by the raw per-iteration
+working-dir convention (confirmed from ``remote_handler``'s ``origin/dev-NU``
+source): ``calchome/{it}/extract/out/manifest.json``. The full per-atom
+uncertainty trajectory, by contrast, *is* the collected
+``uncertainty_select_output/`` (``CommitteeUncertaintySelector`` annotates
+without reducing -- see ``lammps_al.select.selector``'s module docstring),
+so it needs no raw reach-in.
 """
 
 import logging
@@ -46,11 +48,12 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Stage name -> the classic per-iteration ``<stage>_output`` key every
-# accessor below understands. This campaign's ring has 5 stages (sampler ->
-# selector -> annealer -> evaluator -> trainer); jaxrens_al's has 4 (no
-# annealer).
+# accessor below understands. This campaign's ring has 6 stages (sampler ->
+# uncertainty_select -> selector -> annealer -> evaluator -> trainer);
+# jaxrens_al's has 4 (no uncertainty_select, no annealer).
 _STAGE_TO_OUTPUT_KEY = {
     "sampler": "sampler_output",
+    "uncertainty_select": "uncertainty_select_output",
     "selector": "selector_output",
     "annealer": "annealer_output",
     "evaluator": "evaluator_output",
@@ -59,7 +62,6 @@ _STAGE_TO_OUTPUT_KEY = {
 
 # Raw per-iteration working-dir names, confirmed against remote_handler's
 # StagedActiveLearningHandler (origin/dev-NU): calchome/{it}/<name>/...
-_SAMPLE_DIRNAME = "sample"
 _EXTRACT_DIRNAME = "extract"
 
 
@@ -168,24 +170,24 @@ def iteration_dirs(calchome) -> list:
     return sorted(dirs, key=lambda p: int(p.name))
 
 
-def sampler_uncertainty_trajectory(calchome, it: int):
-    """The full uncertainty-tagged sampler trajectory for iteration ``it``.
+def sampler_uncertainty_trajectory(calchome, progress, it: int):
+    """The full uncertainty-tagged trajectory for iteration ``it``, or
+    ``None``.
 
-    ``calchome/{it}/sample/results/out/traj+uncertainties.xyz`` -- never
-    collected into ``sampler_output/`` (only the peak-uncertainty frames
-    are), so this reaches into the raw per-iteration working dir directly.
-    Returns ``None`` if that iteration never sampled (e.g. iteration 0 under
-    ``entry_stage="trainer"``, bootstrap-train only) or hasn't finished yet.
+    ``CommitteeUncertaintySelector`` annotates without reducing (see
+    ``lammps_al.select.selector``'s module docstring), so the whole
+    per-atom-uncertainty-tagged trajectory *is* the recorded
+    ``uncertainty_select_output`` for that iteration -- no raw reach-in
+    needed. Returns ``None`` if that iteration never ran this stage (e.g.
+    iteration 0 under ``entry_stage="trainer"``, bootstrap-train only) or
+    hasn't finished yet.
     """
-    p = (
-        Path(calchome)
-        / str(it)
-        / _SAMPLE_DIRNAME
-        / "results"
-        / "out"
-        / "traj+uncertainties.xyz"
-    )
-    return p if p.exists() else None
+    if it >= len(progress):
+        return None
+    rels = progress[it].get("uncertainty_select_output", []) or []
+    if not rels:
+        return None
+    return (Path(calchome) / rels[0]).resolve()
 
 
 def selector_manifest(calchome, it: int):

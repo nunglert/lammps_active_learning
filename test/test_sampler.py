@@ -3,6 +3,9 @@
 Needs the [run] extra (remote_handler); the module self-skips otherwise. The
 stub-mode tests run with NO cluster, SSH, or LAMMPS -- only remote_handler +
 ase + numpy on the host.
+
+LammpsSampler only runs MD now -- committee-uncertainty scoring/selection is
+a separate actor, see test_committee_selector.py.
 """
 
 import json
@@ -36,8 +39,6 @@ def _sampler(remote_fs, tmp_path, **overrides):
         template_path=template,
         data_path=data_file,
         element_mapping={1: "Cu", 2: "Co"},
-        num_samples=10,
-        uncertainty_cutoff_radius=4.0,
         remote_lammps_executable_path="/remote/lammps/lmp",
         stub=True,
     )
@@ -51,65 +52,26 @@ def test_lammps_sampler_is_a_sampler(mock_remote_fs, tmp_path):
     assert isinstance(s, Sampler)
 
 
-def test_default_settings_num_samples_maps_to_bin_count(
+def test_default_settings_include_element_mapping_and_dump_frequency(
     mock_remote_fs, mock_model_files, tmp_path
 ):
-    """num_samples keeps its previous meaning: trajectory bin_count."""
-    s = _sampler(mock_remote_fs, tmp_path, num_samples=7)
-    s.model_files = mock_model_files
-    settings = s._load_default_settings()
-    assert settings["bin_count"] == 7
-    # sampling_frequency is a distinct flag, not derived from num_samples
-    assert settings["sampling_frequency"] is None
-
-
-def test_default_settings_include_legacy_keys(
-    mock_remote_fs, mock_model_files, tmp_path
-):
-    """The legacy uncertainty payload needs element_mapping/cutoff_radius."""
+    """element_mapping/dump_frequency are the sampler's own concerns now
+    (committee-scoring fields -- cutoff_radius/bin_count/device -- moved to
+    CommitteeUncertaintySelector)."""
     s = _sampler(
         mock_remote_fs,
         tmp_path,
         element_mapping={1: "Cu", 2: "Co"},
-        uncertainty_cutoff_radius=4.2,
+        dump_frequency=20,
     )
     s.model_files = mock_model_files
     settings = s._load_default_settings()
     assert settings["element_mapping"] == {1: "Cu", 2: "Co"}
-    assert settings["cutoff_radius"] == 4.2
-
-
-def test_default_settings_sampling_frequency_independent(
-    mock_remote_fs, mock_model_files, tmp_path
-):
-    """sampling_frequency is its own flag, independent of num_samples."""
-    s = _sampler(
-        mock_remote_fs, tmp_path, sampling_frequency=25, num_samples=None
-    )
-    s.model_files = mock_model_files
-    settings = s._load_default_settings()
-    assert settings["sampling_frequency"] == 25
-    assert settings["bin_count"] is None
-
-
-def test_default_settings_dump_frequency_survives_with_num_samples(
-    mock_remote_fs, mock_model_files, tmp_path
-):
-    """dump_frequency (template-render dump interval) must NOT be dropped
-    when num_samples is also set -- unlike the unrelated sampling_frequency
-    (lammps_dump_sampling.py's payload concept), which IS mutually exclusive
-    with num_samples and gets popped from script_input when both are given
-    (see test_update_warns_and_prefers_num_samples_when_both_specified
-    below). Regression test: setting both num_samples and dump_frequency
-    together (as the real campaign does, for peak-selection + a sane dump
-    size) previously produced a script_input with no dump_frequency key at
-    all, because it originally reused the sampling_frequency name and
-    collided with that exclusion logic."""
-    s = _sampler(mock_remote_fs, tmp_path, num_samples=4, dump_frequency=20)
-    s.model_files = mock_model_files
-    settings = s._load_default_settings()
-    assert settings["bin_count"] == 4
     assert settings["dump_frequency"] == 20
+    assert "bin_count" not in settings
+    assert "cutoff_radius" not in settings
+    assert "device" not in settings
+    assert "sampling_frequency" not in settings
 
 
 def _patch_single_script_task(monkeypatch):
@@ -139,51 +101,29 @@ def _patch_single_script_task(monkeypatch):
     return created
 
 
-def test_update_warns_and_prefers_num_samples_when_both_specified(
-    mock_remote_fs, mock_model_files, tmp_path, monkeypatch, caplog
+def test_update_keeps_dump_frequency(
+    mock_remote_fs, mock_model_files, tmp_path, monkeypatch
 ):
-    """Both num_samples and sampling_frequency -> warn, num_samples wins."""
-    s = _sampler(mock_remote_fs, tmp_path, num_samples=5, stub=False)
+    """dump_frequency reaches the written script_input JSON. Regression
+    guard for the naming-collision bug that once dropped it silently (fixed
+    by removing the colliding sampling_frequency field entirely -- see
+    lammps_al.run.inputs.LammpsSamplingInput's docstring)."""
+    s = _sampler(mock_remote_fs, tmp_path, dump_frequency=20, stub=False)
     created = _patch_single_script_task(monkeypatch)
 
-    with caplog.at_level("WARNING"):
-        s.update(tmp_path / "calcdir", mock_model_files, sampling_frequency=2)
+    s.update(tmp_path / "calcdir", mock_model_files)
 
-    assert any("Both num_samples" in r.message for r in caplog.records)
     script_input = json.loads(Path(created["input_file"]).read_text())
-    assert script_input["bin_count"] == 5
-    assert "sampling_frequency" not in script_input
-
-
-def test_update_keeps_dump_frequency_alongside_num_samples(
-    mock_remote_fs, mock_model_files, tmp_path, monkeypatch, caplog
-):
-    """Regression test (2026-09-11): dump_frequency must reach the written
-    script_input JSON even when num_samples is also set (as the real
-    campaign always does, for peak-selection) -- unlike sampling_frequency
-    immediately above, which is deliberately dropped in that case. This is
-    the exact combination that silently lost the dump-thinning setting in
-    production, since it originally (wrongly) reused the sampling_frequency
-    name/field."""
-    s = _sampler(
-        mock_remote_fs, tmp_path, num_samples=4, dump_frequency=20, stub=False
-    )
-    created = _patch_single_script_task(monkeypatch)
-
-    with caplog.at_level("WARNING"):
-        s.update(tmp_path / "calcdir", mock_model_files)
-
-    assert not any("dump_frequency" in r.message for r in caplog.records)
-    script_input = json.loads(Path(created["input_file"]).read_text())
-    assert script_input["bin_count"] == 4
     assert script_input["dump_frequency"] == 20
 
 
-def test_update_merges_schedule_kwargs_into_script_input(
+def test_update_merges_schedule_kwargs_into_extra_template_kwargs(
     mock_remote_fs, mock_model_files, tmp_path, monkeypatch
 ):
-    """Schedule kwargs are merged into the payload input JSON verbatim."""
-    s = _sampler(mock_remote_fs, tmp_path, num_samples=None, stub=False)
+    """Schedule kwargs that aren't one of LammpsSampler's own known fields
+    are captured under extra_template_kwargs (forwarded to the template by
+    the payload), not silently dropped as an "unknown key"."""
+    s = _sampler(mock_remote_fs, tmp_path, stub=False)
     created = _patch_single_script_task(monkeypatch)
 
     s.update(
@@ -191,11 +131,28 @@ def test_update_merges_schedule_kwargs_into_script_input(
     )
 
     script_input = json.loads(Path(created["input_file"]).read_text())
-    assert script_input["temperature"] == 1000
-    assert script_input["n_run"] == 500
-    # sampling_frequency not set anywhere -> no conflict, stays null
-    assert script_input.get("sampling_frequency") is None
-    assert script_input["bin_count"] is None
+    assert script_input["extra_template_kwargs"] == {
+        "temperature": 1000,
+        "n_run": 500,
+    }
+    assert "temperature" not in script_input
+    assert "n_run" not in script_input
+
+
+def test_update_known_kwarg_overrides_top_level_field(
+    mock_remote_fs, mock_model_files, tmp_path, monkeypatch
+):
+    """A schedule kwarg matching one of LammpsSampler's own fields (e.g.
+    dump_frequency) overrides that field directly, not via
+    extra_template_kwargs."""
+    s = _sampler(mock_remote_fs, tmp_path, dump_frequency=1, stub=False)
+    created = _patch_single_script_task(monkeypatch)
+
+    s.update(tmp_path / "calcdir", mock_model_files, dump_frequency=50)
+
+    script_input = json.loads(Path(created["input_file"]).read_text())
+    assert script_input["dump_frequency"] == 50
+    assert "dump_frequency" not in script_input["extra_template_kwargs"]
 
 
 def test_init_lammps_sampler(mock_remote_fs, tmp_path):
@@ -204,10 +161,8 @@ def test_init_lammps_sampler(mock_remote_fs, tmp_path):
         mock_remote_fs,
         tmp_path,
         element_mapping={1: "Cu", 2: "Co"},
-        num_samples=10,
     )
     assert s.stub is True
-    assert s.num_samples == 10
     assert s.element_mapping == {1: "Cu", 2: "Co"}
 
 
@@ -221,56 +176,49 @@ def test_default_script_points_at_shipped_payload(mock_remote_fs, tmp_path):
 def test_lammps_stub_outputs(
     mock_remote_fs, temp_calcdir, mock_model_files, tmp_path
 ):
-    """get_sampled_configs writes mock samples with uncertainty info."""
-    s = _sampler(mock_remote_fs, tmp_path, num_samples=15)
+    """get_sampled_configs writes a mock trajectory."""
+    s = _sampler(mock_remote_fs, tmp_path)
     s.update(temp_calcdir, mock_model_files)
     output_file = s.get_sampled_configs()
 
     assert output_file.exists()
-    assert output_file.name == "samples.xyz"
+    assert output_file.name == "trajectory.extxyz"
 
-    sampled_atoms = ase.io.read(output_file, index=":")
-    assert len(sampled_atoms) == 15
-    for atoms in sampled_atoms:
-        assert "max_uncertainty" in atoms.info
-        assert "mean_uncertainty" in atoms.info
+    frames = ase.io.read(output_file, index=":")
+    assert len(frames) == 10
+    for atoms in frames:
         assert "step" in atoms.info
 
 
 def test_lammps_create_stub_outputs(mock_remote_fs, tmp_path):
     """_create_stub_outputs builds the expected 26-atom mock structures."""
-    s = _sampler(mock_remote_fs, tmp_path, num_samples=20)
-    stub_samples = s._create_stub_outputs(num_samples=8)
+    s = _sampler(mock_remote_fs, tmp_path)
+    stub_frames = s._create_stub_outputs(num_frames=8)
 
-    assert len(stub_samples) == 8
-    for atoms in stub_samples:
+    assert len(stub_frames) == 8
+    for atoms in stub_frames:
         assert len(atoms) == 26  # 20 Cu + 4 Co + 2 H
-        assert "max_uncertainty" in atoms.info
-        assert atoms.info["max_uncertainty"] > 0
 
 
 def test_default_accelerator_is_gpu(mock_remote_fs, tmp_path):
     """Defaults preserve the production KOKKOS-on-GPU + ML-IAP behaviour."""
     s = _sampler(mock_remote_fs, tmp_path)
     assert s.lammps_args == "-k on g 1 -sf kk -pk kokkos newton on neigh half"
-    assert s.device == "cuda"
     assert s.lammps_pair_style == "mliap"
     assert s.enable_cueq is True
 
 
 def test_cpu_override_is_stored(mock_remote_fs, tmp_path):
-    """A CPU-testable run overrides the accelerator flags, device, and
-    pair_style -- opting into the ``"mace"`` route, not the default."""
+    """A CPU-testable run overrides the accelerator flags and pair_style --
+    opting into the ``"mace"`` route, not the default."""
     s = _sampler(
         mock_remote_fs,
         tmp_path,
         lammps_args="",
-        device="cpu",
         lammps_pair_style="mace",
         enable_cueq=False,
     )
     assert s.lammps_args == ""
-    assert s.device == "cpu"
     assert s.lammps_pair_style == "mace"
     assert s.enable_cueq is False
 

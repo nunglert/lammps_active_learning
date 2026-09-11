@@ -117,19 +117,36 @@ def test_trained_models_and_evaluated_configs_per_iteration(tmp_path):
     ]
 
 
+def test_sampler_uncertainty_trajectory_found_and_missing(tmp_path):
+    """The full annotated trajectory is CommitteeUncertaintySelector's
+    recorded output (it annotates without reducing) -- a progress-based
+    lookup, not a raw reach-in."""
+    (tmp_path / "uncertainty_select_output").mkdir()
+    traj = tmp_path / "uncertainty_select_output" / "u_it1_0.extxyz"
+    traj.write_text("")
+    _write_progress(
+        tmp_path,
+        {
+            "uncertainty_select": {
+                "1": ["uncertainty_select_output/u_it1_0.extxyz"]
+            }
+        },
+    )
+    progress = run_layout.load_progress(tmp_path)
+
+    assert (
+        run_layout.sampler_uncertainty_trajectory(tmp_path, progress, 1)
+        == traj.resolve()
+    )
+    assert (
+        run_layout.sampler_uncertainty_trajectory(tmp_path, progress, 0)
+        is None
+    )
+
+
 # ---------------------------------------------------------------------------
 # Raw reach-ins (not recorded in AL_progress.json)
 # ---------------------------------------------------------------------------
-def test_sampler_uncertainty_trajectory_found_and_missing(tmp_path):
-    out_dir = tmp_path / "1" / "sample" / "results" / "out"
-    out_dir.mkdir(parents=True)
-    traj = out_dir / "traj+uncertainties.xyz"
-    traj.write_text("")
-
-    assert run_layout.sampler_uncertainty_trajectory(tmp_path, 1) == traj
-    assert run_layout.sampler_uncertainty_trajectory(tmp_path, 0) is None
-
-
 def test_selector_manifest_found_and_missing(tmp_path):
     out_dir = tmp_path / "2" / "extract" / "out"
     out_dir.mkdir(parents=True)
