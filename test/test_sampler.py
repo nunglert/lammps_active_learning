@@ -92,6 +92,26 @@ def test_default_settings_sampling_frequency_independent(
     assert settings["bin_count"] is None
 
 
+def test_default_settings_dump_frequency_survives_with_num_samples(
+    mock_remote_fs, mock_model_files, tmp_path
+):
+    """dump_frequency (template-render dump interval) must NOT be dropped
+    when num_samples is also set -- unlike the unrelated sampling_frequency
+    (lammps_dump_sampling.py's payload concept), which IS mutually exclusive
+    with num_samples and gets popped from script_input when both are given
+    (see test_update_warns_and_prefers_num_samples_when_both_specified
+    below). Regression test: setting both num_samples and dump_frequency
+    together (as the real campaign does, for peak-selection + a sane dump
+    size) previously produced a script_input with no dump_frequency key at
+    all, because it originally reused the sampling_frequency name and
+    collided with that exclusion logic."""
+    s = _sampler(mock_remote_fs, tmp_path, num_samples=4, dump_frequency=20)
+    s.model_files = mock_model_files
+    settings = s._load_default_settings()
+    assert settings["bin_count"] == 4
+    assert settings["dump_frequency"] == 20
+
+
 def _patch_single_script_task(monkeypatch):
     """Replace ``SingleScriptTask`` with a recording stub.
 
@@ -133,6 +153,30 @@ def test_update_warns_and_prefers_num_samples_when_both_specified(
     script_input = json.loads(Path(created["input_file"]).read_text())
     assert script_input["bin_count"] == 5
     assert "sampling_frequency" not in script_input
+
+
+def test_update_keeps_dump_frequency_alongside_num_samples(
+    mock_remote_fs, mock_model_files, tmp_path, monkeypatch, caplog
+):
+    """Regression test (2026-09-11): dump_frequency must reach the written
+    script_input JSON even when num_samples is also set (as the real
+    campaign always does, for peak-selection) -- unlike sampling_frequency
+    immediately above, which is deliberately dropped in that case. This is
+    the exact combination that silently lost the dump-thinning setting in
+    production, since it originally (wrongly) reused the sampling_frequency
+    name/field."""
+    s = _sampler(
+        mock_remote_fs, tmp_path, num_samples=4, dump_frequency=20, stub=False
+    )
+    created = _patch_single_script_task(monkeypatch)
+
+    with caplog.at_level("WARNING"):
+        s.update(tmp_path / "calcdir", mock_model_files)
+
+    assert not any("dump_frequency" in r.message for r in caplog.records)
+    script_input = json.loads(Path(created["input_file"]).read_text())
+    assert script_input["bin_count"] == 4
+    assert script_input["dump_frequency"] == 20
 
 
 def test_update_merges_schedule_kwargs_into_script_input(

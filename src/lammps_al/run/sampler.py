@@ -129,6 +129,18 @@ class LammpsSampler(Sampler):
             (pacemaker), or ``"grace"`` (gracemaker) -- see
             ``lammps_sampling.py``'s module docstring for the calculator
             dispatch.
+        dump_frequency: Steps between dumped MD frames, rendered into the
+            LAMMPS template as ``{{ dump_frequency }}``. Distinct from
+            ``sampling_frequency`` (below), which is a *different*,
+            pre-existing concept for ``lammps_dump_sampling.py``'s
+            read-back-an-existing-dump payload (mutually exclusive with
+            ``num_samples`` there, previous-behavior-wins) -- reusing that
+            name for this template-side dump-write interval collided with
+            that exclusion logic and got silently dropped whenever
+            ``num_samples`` was also set (confirmed: a real >20GB dump file
+            in ~10 min despite `sampling_frequency` being set, since
+            `num_samples` is always set too for peak-selection). ``None``
+            (default) falls back to every step at render time.
         stub: Dry-run without a cluster; emit mock samples for testing
     """
 
@@ -152,6 +164,7 @@ class LammpsSampler(Sampler):
         stub: bool = False,
         cluster_config: Optional[ClusterConfig] = None,
         sampling_frequency: Optional[int] = None,
+        dump_frequency: Optional[int] = None,
     ):
         super().__init__()
         if sampling_script is None:
@@ -163,6 +176,7 @@ class LammpsSampler(Sampler):
         self.element_mapping = element_mapping
         self.num_samples = num_samples
         self.sampling_frequency = sampling_frequency
+        self.dump_frequency = dump_frequency
         self.uncertainty_cutoff_radius = uncertainty_cutoff_radius
         self.remote_lammps_executable_path = remote_lammps_executable_path
         self.lammps_args = lammps_args
@@ -196,6 +210,7 @@ class LammpsSampler(Sampler):
             "cutoff_radius": self.uncertainty_cutoff_radius,
             "element_mapping": self.element_mapping,
             "sampling_frequency": self.sampling_frequency,
+            "dump_frequency": self.dump_frequency,
         }
 
     def update(
