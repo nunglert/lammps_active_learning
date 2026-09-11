@@ -42,6 +42,16 @@ class LammpsSamplingInput(ScriptInput):
         seed: Random seed for LAMMPS
         lammps_config_name: Name for generated LAMMPS input file
             (default: "lammps.in")
+        sampling_frequency: Steps between dumped MD frames (rendered into
+            the template as ``{{ dump_frequency }}``). ``None`` (default)
+            falls back to every step (dump_frequency=1) at render time --
+            fine for small systems, but for large ones (hundreds of
+            thousands of atoms) this can produce a huge dump file in
+            minutes; set explicitly for those. Was previously silently
+            dropped as an "unknown key" here and never reached the
+            template at all (the dump line was hardcoded to ``1``) --
+            confirmed as the cause of an unexpectedly large dump file,
+            2026-09-11.
 
     Example:
         >>> config = LammpsSamplingInput.from_file(Path("input.json"))
@@ -102,6 +112,7 @@ class LammpsSamplingInput(ScriptInput):
     # computed here), ACE's `PyACEEnsembleCalculator`, or GRACE's
     # `TPCalculator` (both already return an aggregated `forces_std`).
     backend: str = "mace"
+    sampling_frequency: Optional[int] = None
 
     def validate(self, root: Optional[Path] = None) -> None:
         """Validate configuration parameters.
@@ -125,6 +136,15 @@ class LammpsSamplingInput(ScriptInput):
         if self.bin_count <= 0:
             raise ScriptInputError(
                 f"bin_count must be positive, got {self.bin_count}"
+            )
+
+        if (
+            self.sampling_frequency is not None
+            and self.sampling_frequency <= 0
+        ):
+            raise ScriptInputError(
+                "sampling_frequency must be positive, got "
+                f"{self.sampling_frequency}"
             )
 
         if self.device not in ("cpu", "cuda"):

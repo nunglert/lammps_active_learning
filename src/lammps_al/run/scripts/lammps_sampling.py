@@ -590,6 +590,12 @@ def main(argv: Optional[list] = None) -> None:
         data_file=data_path,
         seed=input_config.seed,
         dump_file=outpath / "md_sampling.dump",
+        # Steps between dumped frames; falls back to every step (the old
+        # hardcoded template value) when unset -- see
+        # LammpsSamplingInput.sampling_frequency's docstring for why this
+        # matters (an unthinned dump can reach tens of GB in minutes on a
+        # large system).
+        dump_frequency=input_config.sampling_frequency or 1,
         final_data_file=outpath / "surface_final.data",
         do_return_path=True,
         trj_file_key="dump_file",

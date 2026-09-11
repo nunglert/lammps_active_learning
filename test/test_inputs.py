@@ -214,3 +214,74 @@ def test_validate_negative_cutoff(tmp_path):
     )
     with pytest.raises(ScriptInputError, match="must be positive"):
         config.validate()
+
+
+def test_from_file_recognizes_sampling_frequency(tmp_path, caplog):
+    """``sampling_frequency`` must round-trip as a real field, not be
+    silently dropped as an "unknown key" (as it was before it was added
+    here -- confirmed as the cause of an unthinned, oversized dump file,
+    2026-09-11: the value never reached the template, which hardcoded the
+    dump frequency to 1)."""
+    lammps_exe = tmp_path / "lmp"
+    lammps_exe.touch()
+
+    input_file = tmp_path / "input.json"
+    input_data = {
+        "lammps_path": str(lammps_exe),
+        "template_file": "lammps.in.template",
+        "data_file": "structure.data",
+        "model_files": ["model1.pt"],
+        "element_mapping": {"1": "H"},
+        "cutoff_radius": 5.0,
+        "bin_count": 10,
+        "seed": 42,
+        "sampling_frequency": 20,
+    }
+    input_file.write_text(json.dumps(input_data))
+
+    with caplog.at_level("WARNING"):
+        config = LammpsSamplingInput.from_file(input_file)
+
+    assert config.sampling_frequency == 20
+    assert not any("unknown key" in r.message.lower() for r in caplog.records)
+
+
+def test_sampling_frequency_defaults_to_none(tmp_path):
+    """Unset (as opposed to explicitly provided) stays None -- the payload
+    side is responsible for falling back to every-step when so."""
+    lammps_exe = tmp_path / "lmp"
+    lammps_exe.touch()
+
+    config = LammpsSamplingInput(
+        lammps_path=lammps_exe,
+        template_file="template.in",
+        data_file="data.in",
+        model_files=["model.pt"],
+        element_mapping={"1": "H"},
+        cutoff_radius=5.0,
+        bin_count=10,
+        seed=42,
+    )
+
+    assert config.sampling_frequency is None
+    config.validate()  # None is valid -- only non-positive values are rejected
+
+
+def test_validate_negative_sampling_frequency(tmp_path):
+    """Validation fails for a non-positive sampling_frequency."""
+    lammps_exe = tmp_path / "lmp"
+    lammps_exe.touch()
+
+    config = LammpsSamplingInput(
+        lammps_path=lammps_exe,
+        template_file="template.in",
+        data_file="data.in",
+        model_files=["model.pt"],
+        element_mapping={"1": "H"},
+        cutoff_radius=5.0,
+        bin_count=10,
+        seed=42,
+        sampling_frequency=0,
+    )
+    with pytest.raises(ScriptInputError, match="sampling_frequency"):
+        config.validate()

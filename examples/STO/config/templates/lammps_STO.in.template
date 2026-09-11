@@ -24,7 +24,7 @@ velocity    all create {{ temperature }} {{ seed }} dist gaussian rot yes mom ye
 thermo          100
 thermo_style    custom step temp etotal press
 
-dump    d_nvt   all custom 1 {{ dump_file }} id type xu yu zu vx vy vz
+dump    d_nvt   all custom {{ dump_frequency }} {{ dump_file }} id type xu yu zu vx vy vz
 
 #########################################################
 #Equilibrate everything at room temperature        

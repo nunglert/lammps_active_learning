@@ -78,6 +78,49 @@ def test_parse_jinja_template_renders_kwargs(tmp_path):
     assert "read_data struct.data" in text
 
 
+def test_ace_template_dump_frequency_is_rendered_not_hardcoded():
+    """Regression test for the real campaign template: the dump line must
+    read ``{{ dump_frequency }}``, not a hardcoded ``1`` -- confirmed as the
+    cause of an unthinned, >20GB dump file in ~10 minutes on the real
+    206941-atom campaign system, 2026-09-11 (dump_frequency was silently
+    dropped upstream as an "unknown key" and never reached the template at
+    all). Renders the actual shipped template, not a synthetic stand-in."""
+    template_dir = (
+        Path(__file__).resolve().parent.parent
+        / "experiments"
+        / "rough_cu_water_al"
+        / "config"
+        / "templates"
+    )
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        out = Path(tmp) / "lammps.in"
+        payload.parse_jinja_template(
+            out,
+            template_dir,
+            "lammps_ace.in.template",
+            model_file="model.yaml",
+            data_file="struct.data",
+            lammps_pair_style="pace product",
+            seed=42,
+            dump_file="traj.dump",
+            dump_frequency=20,
+            final_data_file="final.data",
+        )
+        text = out.read_text()
+
+    dump_lines = [line for line in text.splitlines() if "dump" in line]
+    assert any(
+        "dump" in line and "d_nvt" in line and "20" in line
+        for line in dump_lines
+    ), f"expected a dump line with frequency 20, got: {dump_lines}"
+    assert not any(
+        "dump" in line and "d_nvt" in line and " 1 " in line
+        for line in dump_lines
+    ), "dump frequency looks hardcoded to 1 again"
+
+
 # --- aggregate_uncertainties ----------------------------------------------
 def test_aggregate_uncertainties_full_cutoff_averages_neighbours():
     # Two atoms 1 A apart; per-atom mean uncertainty 3 and 1. With a cutoff
