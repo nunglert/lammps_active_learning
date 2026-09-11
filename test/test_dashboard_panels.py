@@ -12,10 +12,17 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-from alviz.dashboard import Dashboard
 from ase import Atoms
 
 ase_io = pytest.importorskip("ase.io")
+# NOT "alviz" bare: some environments have a stray sys.path entry that
+# resolves the bare name to an empty namespace package even with the real
+# alviz uninstalled (confirmed locally), so the actual submodule needs to
+# be the one checked, or this "skip" never fires and a later import fails
+# for real instead.
+pytest.importorskip("alviz.dashboard")
+
+from alviz.dashboard import Dashboard  # noqa: E402
 
 from lammps_al.dashboard.panels.committee_parity import (  # noqa: E402
     CommitteeParityPanel,

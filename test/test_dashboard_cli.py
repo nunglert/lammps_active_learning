@@ -11,6 +11,8 @@ import pytest
 from ase import Atoms
 
 ase_io = pytest.importorskip("ase.io")
+# Not "alviz" bare -- see test_dashboard_panels.py's comment on why.
+pytest.importorskip("alviz.dashboard")
 pytest.importorskip("pypdf")
 
 from lammps_al.dashboard import cli  # noqa: E402

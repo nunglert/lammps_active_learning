@@ -84,14 +84,17 @@ def test_ace_template_dump_frequency_is_rendered_not_hardcoded():
     cause of an unthinned, >20GB dump file in ~10 minutes on the real
     206941-atom campaign system, 2026-09-11 (dump_frequency was silently
     dropped upstream as an "unknown key" and never reached the template at
-    all). Renders the actual shipped template, not a synthetic stand-in."""
-    template_dir = (
-        Path(__file__).resolve().parent.parent
-        / "experiments"
-        / "rough_cu_water_al"
-        / "config"
-        / "templates"
-    )
+    all).
+
+    Renders a git-tracked copy of the real shipped template
+    (test/data/lammps/lammps_ace.in.template), not a synthetic stand-in --
+    the actual campaign copy under experiments/rough_cu_water_al/ is
+    gitignored (campaign-specific working files), so it doesn't exist in a
+    fresh CI clone and can't be read directly here. Keep the two in sync by
+    hand; both files cross-reference each other in their header comments.
+    """
+    template_dir = Path(__file__).resolve().parent / "data" / "lammps"
+
     import tempfile
 
     with tempfile.TemporaryDirectory() as tmp:
