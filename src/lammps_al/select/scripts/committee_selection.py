@@ -28,17 +28,38 @@ ensemble calculators already aggregate a ``forces_std`` across the
 committee, unlike MACE's ``MACECalculator`` (``forces_comm``, per-model
 forces -- the stdev is computed here).
 
+``backend="ace"`` is the one exception to "one ASE calculator spanning the
+committee": it does NOT use ``pyace.PyACEEnsembleCalculator`` (confirmed,
+by reading its source, to be a pure CPU/Cython evaluator with no GPU code
+path at all -- unusably slow on a large system, e.g. ~40+ min for one real
+206941-atom campaign trajectory and still not finished). Instead it uses
+``tensorpotential``'s own re-implementation of ACE (the OLD, pre-GRACE-
+rename API, only installed in the ``ace_gpu_train`` env -- see
+``experiments/rough_cu_water_al/build/TENSORPOT_ACE_INCOMPATIBILITY.md``),
+which is GPU-capable, plus ``matscipy`` for the neighbor list (13.6x faster
+than ASE's own on that same real 206941-atom frame -- identical pair count
+-- and also what the *current*, actively-maintained ``grace-tensorpotential``
+package itself uses instead of ASE). Full investigation, benchmarks, and
+the exact numbers behind this design: ``experiments/rough_cu_water_al/
+build/tp_ace_diag/RESULTS.md``. Needs the ``ace_gpu_train``-specific extra
+dependencies (``matscipy``, the old ``tensorpotential`` API) -- not
+declared in this repo's own extras, since they're a one-off environment
+fix on musica, not a portable pip dependency (see that env's own setup
+notes).
+
 Shipped and executed on the cluster by
 :class:`lammps_al.select.selector.CommitteeUncertaintySelector` -- it is not
 imported as a module in the normal flow (``main`` runs it from ``sys.argv``),
 but its functions are import-safe so they can be unit-tested. The heavy
-``torch``/``mace``/``pyace``/``tensorpotential`` imports are done lazily
-inside the functions that need them, so the pure helpers
+``torch``/``mace``/``pyace``/``tensorpotential``/``matscipy`` imports are
+done lazily inside the functions that need them, so the pure helpers
 (``aggregate_uncertainties``, ``select_max_uncertainty_frames``) import with
 only ``ase`` + ``numpy`` present -- no committee stack, no GPU.
 """
 
+import glob
 import logging
+import os
 import pathlib
 import sys
 import time
@@ -51,6 +72,71 @@ import numpy as np
 
 # ``CommitteeSelectionInput`` (and thus ``remote_handler``) is imported
 # lazily in ``main`` so the pure helpers below import with only ase + numpy.
+
+
+def _fix_tensorflow_gpu_libs() -> None:
+    """Re-exec this process once with ``LD_LIBRARY_PATH`` covering every
+    ``site-packages/nvidia/*/lib`` directory, if not already done.
+
+    ``ace_gpu_train``'s TensorFlow can't find its own pip-bundled CUDA
+    libraries otherwise: the ``nvidia-cudnn-cu12``/``nvidia-cublas-cu12``
+    packages (and their real ``.so`` files) are genuinely installed, but
+    ``LD_LIBRARY_PATH`` doesn't include their directories and TF's RPATH-
+    based auto-discovery of sibling ``nvidia-*-cu12`` packages isn't
+    finding them either in this env -- confirmed by direct testing (see
+    ``experiments/rough_cu_water_al/build/tp_ace_diag/RESULTS.md``).
+    Without this, TensorFlow silently falls back to CPU
+    (``Cannot dlopen some GPU libraries... Skipping registering GPU
+    devices``) even inside a real ``--gres=gpu`` SLURM allocation.
+
+    Setting ``os.environ["LD_LIBRARY_PATH"]`` alone, mid-process, does NOT
+    work -- confirmed empirically: glibc's dynamic linker reads
+    ``LD_LIBRARY_PATH`` once at process exec and does not re-check it for
+    a later ``import tensorflow`` further down the same process. Hence the
+    re-exec: this re-runs the current script once, with the corrected
+    ``LD_LIBRARY_PATH`` actually in place at the new process's exec time.
+
+    No-op (returns immediately) on the re-exec'd process (guarded by a
+    sentinel env var), and also if no ``nvidia/*/lib`` directories are
+    found at all (e.g. a CPU-only env, or a ``mace``/``grace`` job whose
+    env doesn't have this same gap) -- this is a targeted fix for one
+    specific environment gap, not a general-purpose CUDA installer. Called
+    unconditionally (not gated on ``backend``): harmless everywhere it
+    isn't needed, and this same ``LD_LIBRARY_PATH`` gap plausibly affects
+    any TensorFlow-based backend in an env that has it -- not just
+    ``"ace"``'s ``tensorpotential`` usage.
+
+    Only ever called from the ``if __name__ == "__main__":`` guard at the
+    bottom of this file, before :func:`main` -- never from inside
+    :func:`main`/:func:`annotate_uncertainties` themselves. ``os.execv``
+    replaces the *current* process image outright (it doesn't fork); calling
+    it after :func:`main` has already started would (a) re-run whatever
+    file-creating side effects already happened (e.g. ``outpath.mkdir
+    (exist_ok=False)`` would then raise ``FileExistsError`` on the restarted
+    process) and (b) if ``main()`` were ever called in-process (e.g. from a
+    test, with a custom ``argv`` that isn't ``sys.argv``), would hijack that
+    *entire* process (a test runner included) into re-executing this script
+    with the wrong arguments instead.
+    """
+    if os.environ.get("_TP_GPU_LIBS_FIXED") == "1":
+        return
+
+    site_packages = next(
+        (p for p in sys.path if p.endswith("site-packages")), None
+    )
+    if site_packages is None:
+        return
+    libdirs = sorted(
+        glob.glob(os.path.join(site_packages, "nvidia", "*", "lib"))
+    )
+    if not libdirs:
+        return
+
+    os.environ["LD_LIBRARY_PATH"] = (
+        ":".join(libdirs) + ":" + os.environ.get("LD_LIBRARY_PATH", "")
+    )
+    os.environ["_TP_GPU_LIBS_FIXED"] = "1"
+    os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
 def aggregate_uncertainties(
@@ -194,6 +280,112 @@ def _committee_force_stdev(backend: str, atoms, calculator) -> np.ndarray:
     return atoms.calc.results["forces_std"]
 
 
+def _build_ace_tensorpotential_models(model_files: list, device: str) -> list:
+    """One ``TensorPotential`` per ACE committee member -- the GPU-capable
+    replacement for ``PyACEEnsembleCalculator`` (see the module docstring
+    and ``experiments/rough_cu_water_al/build/tp_ace_diag/RESULTS.md``).
+
+    Built once per :func:`annotate_uncertainties` call and reused across
+    every trajectory frame. ``TensorPotential._evaluate`` is a
+    ``tf.function`` with an explicit ``input_signature`` using dynamic
+    (``None``) leading dimensions, so it traces its graph once regardless
+    of how many atoms/pairs any given frame has -- confirmed: a real
+    206941-atom frame's first ``evaluate()`` call took ~26s (incl. one-time
+    tracing), a second call ~2.6s. Re-instantiating a ``TensorPotential``
+    per frame would pay that tracing cost every frame instead of once.
+
+    Args:
+        model_files: Paths to the committee's pacemaker ``.yaml``/``.yace``
+            potential files.
+        device: ``"cuda"`` or ``"cpu"``.
+
+    Returns:
+        One ``TensorPotential`` instance per committee member, in order.
+    """
+    from pyace import BBasisConfiguration
+    from tensorpotential.potentials.ace import ACE
+    from tensorpotential.tensorpot import TensorPotential
+    from tensorpotential.utils.utilities import init_gpu_config
+
+    init_gpu_config({"gpu_index": 0 if device == "cuda" else -1})
+
+    models = []
+    for model_file in model_files:
+        bbasisconfig = BBasisConfiguration(str(model_file))
+        ace_potential = ACE(bbasisconfig)
+        models.append(TensorPotential(ace_potential))
+    return models
+
+
+def _tp_atoms_from_matscipy(atoms, cutoff: float) -> dict:
+    """Build one frame's neighbor-list data in the shape
+    ``tensorpotential.utils.utilities.supply_batch``/``TensorPotential.
+    evaluate`` need, using ``matscipy.neighbours.neighbour_list`` instead
+    of ``tensorpotential.utils.utilities.generate_tp_atoms``'s ASE-based
+    (``ase.neighborlist.NewPrimitiveNeighborList``) neighbor search.
+
+    Confirmed (see RESULTS.md) 13.6x faster on a real 206941-atom frame
+    (4.2s vs 57s) with an identical pair count, and is what the current,
+    actively-maintained ``grace-tensorpotential`` package itself already
+    uses instead of ASE's own neighbor list.
+
+    Unlike ``generate_tp_atoms`` (fitting-data-prep code -- it reads
+    ``atoms.get_potential_energy()``/``.get_forces()``), this never reads
+    real energy/forces: it fills ``_energy``/``_forces``/``_eweights``/
+    ``_fweights`` with placeholder zeros, since ``TensorPotential.
+    evaluate()`` never reads them (only ``positions``/``offsets``/
+    ``cell``/``ind_i``/``ind_j``/``mu_i``/``mu_j``/``pair_map``/
+    ``cell_map``/``e_map`` -- see ``tensorpotential.tensorpot.
+    TensorPotential._evaluate``'s ``input_signature``); pure inference, not
+    fitting.
+    """
+    from matscipy.neighbours import neighbour_list
+
+    at_nums = atoms.get_atomic_numbers()
+    ind_i, ind_j, offsets = neighbour_list("ijS", atoms, cutoff)
+    return {
+        "_ind_i": ind_i,
+        "_ind_j": ind_j,
+        "_mu_i": at_nums[ind_i],
+        "_mu_j": at_nums[ind_j],
+        "_offsets": offsets.astype(np.float64),
+        "_positions": atoms.get_scaled_positions().astype(np.float64),
+        "_cell": atoms.get_cell().reshape(1, 3, 3).astype(np.float64),
+        "_eweights": np.ones((1, 1)),
+        "_fweights": np.ones((len(atoms), 1)),
+        "_energy": np.zeros((1, 1)),
+        "_forces": np.zeros((len(atoms), 3)),
+    }
+
+
+def _ace_committee_force_stdev(
+    models: list, atoms, cutoff_radius: float
+) -> np.ndarray:
+    """Per-atom, per-component force standard deviation across an ACE
+    committee, via ``tensorpotential`` (GPU-capable) instead of ``pyace``
+    (CPU-only) -- see the module docstring.
+
+    Args:
+        models: Committee members, from :func:`_build_ace_tensorpotential_models`.
+        atoms: Structure to evaluate (not mutated -- unlike
+            :func:`_committee_force_stdev`'s ASE-``Calculator`` path, this
+            never attaches a calculator to ``atoms``).
+        cutoff_radius: Neighbor-list cutoff (Angstrom).
+
+    Returns:
+        Force standard deviation, shape ``(n_atoms, 3)``.
+    """
+    from tensorpotential.utils.utilities import supply_batch
+
+    tp_atoms = _tp_atoms_from_matscipy(atoms, cutoff_radius)
+    batch = supply_batch([tp_atoms])
+    forces = []
+    for tp in models:
+        _, f, _ = tp.evaluate(batch)
+        forces.append(np.asarray(f))
+    return np.std(np.stack(forces, axis=0), axis=0, ddof=1)
+
+
 def annotate_uncertainties(
     trajectory_file: pathlib.Path,
     model_files: list,
@@ -219,9 +411,13 @@ def annotate_uncertainties(
         output_file: path to write the annotated trajectory to
         logger: logger
         device: compute device for the committee calculator, where the
-            backend's calculator takes one ("cuda" or "cpu"; MACE only)
+            backend's calculator takes one ("cuda" or "cpu"; MACE and ACE)
         backend: ``"mace"``, ``"ace"``, or ``"grace"`` -- see the module
-            docstring and :func:`_build_committee_calculator`.
+            docstring and :func:`_build_committee_calculator`. ``"ace"``
+            uses a different (GPU-capable) code path,
+            :func:`_build_ace_tensorpotential_models` /
+            :func:`_ace_committee_force_stdev`, not
+            :func:`_build_committee_calculator`.
     """
     structs = ase.io.read(trajectory_file, index=":")
     n_frames = len(structs)
@@ -233,16 +429,22 @@ def annotate_uncertainties(
         len(structs[0]) if structs else 0,
     )
 
-    model_calc = _build_committee_calculator(backend, model_files, device)
+    if backend == "ace":
+        models = _build_ace_tensorpotential_models(model_files, device)
+    else:
+        model_calc = _build_committee_calculator(backend, model_files, device)
 
     start = time.monotonic()
     for i, atoms in enumerate(structs):
-        a = atoms.copy()
-        stdev = _committee_force_stdev(backend, a, model_calc)
+        if backend == "ace":
+            stdev = _ace_committee_force_stdev(models, atoms, cutoff_radius)
+        else:
+            a = atoms.copy()
+            stdev = _committee_force_stdev(backend, a, model_calc)
         struct_uncertainties = aggregate_uncertainties(
-            atom_pos=a.get_positions(),
-            unit_cell=a.cell,
-            boundary_conditions=a.pbc,
+            atom_pos=atoms.get_positions(),
+            unit_cell=atoms.cell,
+            boundary_conditions=atoms.pbc,
             atomic_uncertainties=stdev,
             r_cut=cutoff_radius,
         )
@@ -289,8 +491,6 @@ def main(argv: Optional[list] = None) -> None:
     # MACE's LAMMPS/ASE calculators default to GPU and raise on CPU tensors
     # ("Set MACE_ALLOW_CPU=true ..."). When the run is CPU-bound, opt in.
     if input_config.device == "cpu":
-        import os
-
         os.environ["MACE_ALLOW_CPU"] = "true"
 
     outpath = calcpath / "out"
@@ -318,4 +518,7 @@ def main(argv: Optional[list] = None) -> None:
 
 
 if __name__ == "__main__":
+    # Only here, before main() does anything -- see _fix_tensorflow_gpu_libs's
+    # own docstring for why this must never run from inside main() itself.
+    _fix_tensorflow_gpu_libs()
     main()

@@ -257,15 +257,17 @@ def _write_extxyz_trajectory(path, n_frames=4, box=8.0, seed=0):
     return path
 
 
-@pytest.mark.parametrize("backend", ["ace", "grace"])
-def test_annotate_uncertainties_scores_every_frame_ace_grace(
-    tmp_path, monkeypatch, backend
+def test_annotate_uncertainties_scores_every_frame_grace(
+    tmp_path, monkeypatch
 ):
     """Full annotation pipeline (read trajectory -> score -> aggregate ->
-    write) for the ace/grace backends -- with fake calculators instead of a
-    real trained committee (none exist yet for these backends). No
-    reduction: every frame that went in comes back out."""
-    _FAKE_BACKEND_INSTALLERS[backend](monkeypatch)
+    write) for the grace backend (still routed through
+    _build_committee_calculator/_committee_force_stdev, unlike ace -- see
+    test_ace_backend_uses_tensorpotential_not_pyace_ensemble below) -- with
+    a fake calculator instead of a real trained committee (none exist yet
+    for this backend). No reduction: every frame that went in comes back
+    out."""
+    _FAKE_BACKEND_INSTALLERS["grace"](monkeypatch)
 
     import ase.io
 
@@ -281,7 +283,7 @@ def test_annotate_uncertainties_scores_every_frame_ace_grace(
         output_file=output,
         logger=logging.getLogger("test"),
         device="cpu",
-        backend=backend,
+        backend="grace",
     )
 
     annotated = ase.io.read(output, index=":")
@@ -292,3 +294,283 @@ def test_annotate_uncertainties_scores_every_frame_ace_grace(
         assert unc.shape == (4,)
         assert np.all(np.isfinite(unc))
         assert np.all(unc >= 0.0)
+
+
+# --- backend="ace": tensorpotential (GPU-capable), not PyACEEnsembleCalculator
+def _install_fake_ace_tensorpotential_stack(monkeypatch, member_forces):
+    """Fake pyace.BBasisConfiguration + tensorpotential's ACE/TensorPotential
+    + matscipy's neighbour_list, so the tensorpotential-based ace path
+    (_build_ace_tensorpotential_models / _tp_atoms_from_matscipy /
+    _ace_committee_force_stdev) can be exercised without any of those
+    packages installed.
+
+    Args:
+        member_forces: list of (n_atoms, 3) arrays, one per committee
+            member -- each fake TensorPotential.evaluate() returns the
+            corresponding array (tiled per frame via e_map), so the test
+            can assert the exact resulting stdev.
+    """
+    pyace_module = types.ModuleType("pyace")
+
+    class _FakeBBasisConfiguration:
+        def __init__(self, path):
+            self.path = path
+
+    pyace_module.BBasisConfiguration = _FakeBBasisConfiguration
+    monkeypatch.setitem(sys.modules, "pyace", pyace_module)
+
+    tensorpotential = types.ModuleType("tensorpotential")
+    potentials = types.ModuleType("tensorpotential.potentials")
+    potentials_ace = types.ModuleType("tensorpotential.potentials.ace")
+    tensorpot_mod = types.ModuleType("tensorpotential.tensorpot")
+    utils = types.ModuleType("tensorpotential.utils")
+    utilities = types.ModuleType("tensorpotential.utils.utilities")
+
+    class _FakeACE:
+        def __init__(self, bbasisconfig, **kwargs):
+            self.bbasisconfig = bbasisconfig
+
+    # One fake TensorPotential per member_forces entry, constructed in the
+    # same order _build_ace_tensorpotential_models builds them (one per
+    # model_files entry) -- a mutable counter closes over member_forces so
+    # each successive construction picks the next member's fixed forces.
+    construction_order = {"i": 0}
+
+    class _FakeTensorPotential:
+        def __init__(self, potential):
+            self.potential = potential
+            self.forces = member_forces[construction_order["i"]]
+            construction_order["i"] += 1
+
+        def evaluate(self, batch):
+            n_frames = len(np.unique(batch["e_map"]))
+            forces = np.tile(self.forces, (n_frames, 1))
+            energy = np.zeros((n_frames,))
+            return energy, forces, None
+
+    gpu_config_calls = []
+
+    def _fake_init_gpu_config(config):
+        gpu_config_calls.append(config)
+
+    def _fake_supply_batch(tp_atoms_list):
+        e_map = np.concatenate(
+            [
+                np.full(len(d["_positions"]), j)
+                for j, d in enumerate(tp_atoms_list)
+            ]
+        )
+        return {"e_map": e_map}
+
+    potentials_ace.ACE = _FakeACE
+    tensorpot_mod.TensorPotential = _FakeTensorPotential
+    utilities.init_gpu_config = _fake_init_gpu_config
+    utilities.supply_batch = _fake_supply_batch
+    potentials.ace = potentials_ace
+    tensorpotential.potentials = potentials
+    tensorpotential.tensorpot = tensorpot_mod
+    tensorpotential.utils = utils
+    utils.utilities = utilities
+
+    monkeypatch.setitem(sys.modules, "tensorpotential", tensorpotential)
+    monkeypatch.setitem(sys.modules, "tensorpotential.potentials", potentials)
+    monkeypatch.setitem(
+        sys.modules, "tensorpotential.potentials.ace", potentials_ace
+    )
+    monkeypatch.setitem(
+        sys.modules, "tensorpotential.tensorpot", tensorpot_mod
+    )
+    monkeypatch.setitem(sys.modules, "tensorpotential.utils", utils)
+    monkeypatch.setitem(
+        sys.modules, "tensorpotential.utils.utilities", utilities
+    )
+
+    matscipy_module = types.ModuleType("matscipy")
+    neighbours = types.ModuleType("matscipy.neighbours")
+
+    def _fake_neighbour_list(quantities, atoms, cutoff):
+        assert quantities == "ijS"
+        n = len(atoms)
+        i, j = np.meshgrid(np.arange(n), np.arange(n), indexing="ij")
+        mask = i != j
+        ind_i = i[mask].astype(np.int32)
+        ind_j = j[mask].astype(np.int32)
+        offsets = np.zeros((len(ind_i), 3), dtype=np.float64)
+        return ind_i, ind_j, offsets
+
+    neighbours.neighbour_list = _fake_neighbour_list
+    matscipy_module.neighbours = neighbours
+    monkeypatch.setitem(sys.modules, "matscipy", matscipy_module)
+    monkeypatch.setitem(sys.modules, "matscipy.neighbours", neighbours)
+
+    return gpu_config_calls
+
+
+def test_build_ace_tensorpotential_models_one_per_file_and_gpu_index(
+    monkeypatch,
+):
+    """One TensorPotential per model file, in order; init_gpu_config's
+    gpu_index follows device ("cuda" -> 0, "cpu" -> -1)."""
+    # 3 entries: 2 for the first call below, 1 for the second -- the fake's
+    # construction-order counter is shared across both calls in this test.
+    gpu_config_calls = _install_fake_ace_tensorpotential_stack(
+        monkeypatch, member_forces=[np.zeros((1, 3))] * 3
+    )
+
+    models = payload._build_ace_tensorpotential_models(
+        ["m0.yaml", "m1.yaml"], device="cuda"
+    )
+    assert len(models) == 2
+    assert models[0].potential.bbasisconfig.path == "m0.yaml"
+    assert models[1].potential.bbasisconfig.path == "m1.yaml"
+    assert gpu_config_calls == [{"gpu_index": 0}]
+
+    gpu_config_calls.clear()
+    payload._build_ace_tensorpotential_models(["m0.yaml"], device="cpu")
+    assert gpu_config_calls == [{"gpu_index": -1}]
+
+
+def test_tp_atoms_from_matscipy_shapes(monkeypatch):
+    """The dict shape supply_batch/TensorPotential.evaluate need, built
+    from matscipy's neighbour_list output."""
+    _install_fake_ace_tensorpotential_stack(
+        monkeypatch, member_forces=[np.zeros((1, 3))]
+    )
+    atoms = Atoms(
+        "H3",
+        positions=[[0, 0, 0], [1, 0, 0], [0, 1, 0]],
+        cell=[9, 9, 9],
+        pbc=True,
+    )
+
+    tp_atoms = payload._tp_atoms_from_matscipy(atoms, cutoff=4.0)
+
+    n_pairs = 3 * 2  # 3 atoms, all-pairs excluding self (fake neighbour_list)
+    assert tp_atoms["_ind_i"].shape == (n_pairs,)
+    assert tp_atoms["_ind_j"].shape == (n_pairs,)
+    assert tp_atoms["_mu_i"].shape == (n_pairs,)
+    assert tp_atoms["_mu_j"].shape == (n_pairs,)
+    assert tp_atoms["_offsets"].shape == (n_pairs, 3)
+    assert tp_atoms["_positions"].shape == (3, 3)
+    assert tp_atoms["_cell"].shape == (1, 3, 3)
+    assert tp_atoms["_forces"].shape == (3, 3)
+    assert np.all(tp_atoms["_forces"] == 0.0)
+
+
+def test_ace_committee_force_stdev_matches_manual_std(monkeypatch):
+    """The returned stdev is exactly np.std(stack(member_forces), axis=0,
+    ddof=1) -- the same ensemble-spread math the mace branch of
+    _committee_force_stdev already uses, just computed across separately-
+    evaluated TensorPotential members instead of one calculator's
+    forces_comm."""
+    forces_a = np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]])
+    forces_b = np.array([[3.0, 0.0, 0.0], [0.0, 5.0, 0.0]])
+    _install_fake_ace_tensorpotential_stack(
+        monkeypatch, member_forces=[forces_a, forces_b]
+    )
+    models = payload._build_ace_tensorpotential_models(
+        ["m0.yaml", "m1.yaml"], device="cpu"
+    )
+    atoms = Atoms(
+        "H2", positions=[[0, 0, 0], [1, 0, 0]], cell=[9, 9, 9], pbc=True
+    )
+
+    stdev = payload._ace_committee_force_stdev(
+        models, atoms, cutoff_radius=4.0
+    )
+
+    expected = np.std(np.stack([forces_a, forces_b]), axis=0, ddof=1)
+    np.testing.assert_allclose(stdev, expected)
+
+
+def test_annotate_uncertainties_ace_backend_uses_tensorpotential(
+    tmp_path, monkeypatch
+):
+    """backend="ace" must route through _build_ace_tensorpotential_models /
+    _ace_committee_force_stdev (tensorpotential, GPU-capable), NOT
+    _build_committee_calculator's PyACEEnsembleCalculator path (CPU-only,
+    confirmed unusably slow on the real campaign system) -- see the module
+    docstring and experiments/rough_cu_water_al/build/tp_ace_diag/
+    RESULTS.md."""
+    n_atoms = 4
+    _install_fake_ace_tensorpotential_stack(
+        monkeypatch,
+        member_forces=[
+            np.zeros((n_atoms, 3)),
+            np.ones((n_atoms, 3)),
+        ],
+    )
+
+    import ase.io
+
+    trajectory = _write_extxyz_trajectory(
+        tmp_path / "trajectory.extxyz", n_frames=3
+    )
+    output = tmp_path / "annotated.extxyz"
+
+    payload.annotate_uncertainties(
+        trajectory_file=trajectory,
+        model_files=["member_a.yaml", "member_b.yaml"],
+        cutoff_radius=4.0,
+        output_file=output,
+        logger=logging.getLogger("test"),
+        device="cpu",
+        backend="ace",
+    )
+
+    annotated = ase.io.read(output, index=":")
+    assert len(annotated) == 3
+    for at in annotated:
+        unc = at.arrays["uncertainty"]
+        assert unc.shape == (n_atoms,)
+        assert np.all(np.isfinite(unc))
+        assert np.all(unc >= 0.0)
+
+
+# --- _fix_tensorflow_gpu_libs -----------------------------------------------
+def test_fix_tensorflow_gpu_libs_noop_when_already_fixed(monkeypatch):
+    """The sentinel env var short-circuits before touching sys.path/execv
+    at all."""
+    monkeypatch.setenv("_TP_GPU_LIBS_FIXED", "1")
+
+    def _boom(*a, **k):
+        raise AssertionError("os.execv must not be called when already fixed")
+
+    monkeypatch.setattr(payload.os, "execv", _boom)
+
+    payload._fix_tensorflow_gpu_libs()  # must return, not raise
+
+
+def test_fix_tensorflow_gpu_libs_noop_when_no_nvidia_dirs(monkeypatch):
+    """No nvidia/*/lib directories found -> no-op, no execv."""
+    monkeypatch.delenv("_TP_GPU_LIBS_FIXED", raising=False)
+    monkeypatch.setattr(payload.glob, "glob", lambda *a, **k: [])
+
+    def _boom(*a, **k):
+        raise AssertionError("os.execv must not be called with no nvidia dirs")
+
+    monkeypatch.setattr(payload.os, "execv", _boom)
+
+    payload._fix_tensorflow_gpu_libs()
+
+
+def test_fix_tensorflow_gpu_libs_reexecs_with_fixed_path(monkeypatch):
+    """When nvidia/*/lib dirs are found and not yet fixed, it sets
+    LD_LIBRARY_PATH and re-execs -- mocking os.execv so this test doesn't
+    actually replace the pytest process."""
+    monkeypatch.delenv("_TP_GPU_LIBS_FIXED", raising=False)
+    monkeypatch.setattr(
+        payload.glob, "glob", lambda *a, **k: ["/fake/nvidia/cudnn/lib"]
+    )
+    monkeypatch.delenv("LD_LIBRARY_PATH", raising=False)
+
+    execv_calls = []
+    monkeypatch.setattr(payload.os, "execv", lambda *a: execv_calls.append(a))
+
+    payload._fix_tensorflow_gpu_libs()
+
+    assert len(execv_calls) == 1
+    assert payload.os.environ["LD_LIBRARY_PATH"].startswith(
+        "/fake/nvidia/cudnn/lib:"
+    )
+    assert payload.os.environ["_TP_GPU_LIBS_FIXED"] == "1"
