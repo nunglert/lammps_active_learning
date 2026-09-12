@@ -41,6 +41,7 @@ only ``ase`` + ``numpy`` present -- no committee stack, no GPU.
 import logging
 import pathlib
 import sys
+import time
 import warnings
 from pathlib import Path
 from typing import Optional
@@ -223,10 +224,19 @@ def annotate_uncertainties(
             docstring and :func:`_build_committee_calculator`.
     """
     structs = ase.io.read(trajectory_file, index=":")
+    n_frames = len(structs)
+    logger.info(
+        "Annotating %d frames with committee uncertainty (backend=%r, "
+        "%d atoms/frame)",
+        n_frames,
+        backend,
+        len(structs[0]) if structs else 0,
+    )
 
     model_calc = _build_committee_calculator(backend, model_files, device)
 
-    for atoms in structs:
+    start = time.monotonic()
+    for i, atoms in enumerate(structs):
         a = atoms.copy()
         stdev = _committee_force_stdev(backend, a, model_calc)
         struct_uncertainties = aggregate_uncertainties(
@@ -238,7 +248,20 @@ def annotate_uncertainties(
         )
         atoms.arrays["uncertainty"] = struct_uncertainties
 
-    logger.info(f"Annotated {len(structs)} frames with uncertainty")
+        elapsed = time.monotonic() - start
+        per_frame = elapsed / (i + 1)
+        remaining = per_frame * (n_frames - i - 1)
+        logger.info(
+            "Scored frame %d/%d (%.1fs elapsed, %.1fs/frame, ~%.1fs "
+            "remaining)",
+            i + 1,
+            n_frames,
+            elapsed,
+            per_frame,
+            remaining,
+        )
+
+    logger.info(f"Annotated {n_frames} frames with uncertainty")
     ase.io.write(output_file, structs, format="extxyz")
 
 
@@ -250,7 +273,11 @@ def main(argv: Optional[list] = None) -> None:
     every frame of the trajectory, and writes the ``is_finished.info``
     success marker that ``SingleScriptTask.finish_check`` polls on the host.
     """
+    from remote_handler import configure_logging
+
     from lammps_al.select.inputs import CommitteeSelectionInput
+
+    configure_logging()
 
     argv = sys.argv if argv is None else argv
 
