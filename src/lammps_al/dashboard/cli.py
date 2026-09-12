@@ -3,8 +3,9 @@
 Deliberately no panel registry or config-file layer (unlike jaxrens_al's
 ``jaxrens-al`` CLI, which spans many trainer/sampler backends across a
 maintained multi-user tool) -- this is one campaign, one committee family,
-5 panels, single user. See ``experiments/rough_cu_water_al/dashboard.py``
-for the per-campaign wrapper.
+5 panels, single user. A per-campaign wrapper is just a thin script calling
+:func:`main` with that campaign's ``calchome`` and species list (campaign
+working directories are gitignored, not shipped with this repo).
 """
 
 from __future__ import annotations

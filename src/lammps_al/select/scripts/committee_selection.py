@@ -35,17 +35,17 @@ path at all -- unusably slow on a large system, e.g. ~40+ min for one real
 206941-atom campaign trajectory and still not finished). Instead it uses
 ``tensorpotential``'s own re-implementation of ACE (the OLD, pre-GRACE-
 rename API, only installed in the ``ace_gpu_train`` env -- see
-``experiments/rough_cu_water_al/build/TENSORPOT_ACE_INCOMPATIBILITY.md``),
-which is GPU-capable, plus ``matscipy`` for the neighbor list (13.6x faster
-than ASE's own on that same real 206941-atom frame -- identical pair count
--- and also what the *current*, actively-maintained ``grace-tensorpotential``
-package itself uses instead of ASE). Full investigation, benchmarks, and
-the exact numbers behind this design: ``experiments/rough_cu_water_al/
-build/tp_ace_diag/RESULTS.md``. Needs the ``ace_gpu_train``-specific extra
-dependencies (``matscipy``, the old ``tensorpotential`` API) -- not
-declared in this repo's own extras, since they're a one-off environment
-fix on musica, not a portable pip dependency (see that env's own setup
-notes).
+``pyproject.toml``'s ``[ace_tensorpot_gpu]`` extra comment), which is
+GPU-capable, plus ``matscipy`` for the neighbor list (confirmed 13.6x
+faster than ASE's own on a real 206941-atom campaign frame, identical pair
+count -- and also what the *current*, actively-maintained
+``grace-tensorpotential`` package itself uses instead of ASE). Needs the
+``[ace_tensorpot_gpu]`` extra (``matscipy`` -- a normal, portable
+dependency, declared there directly -- plus the old ``tensorpotential``
+API via ``remote_handler``'s own ``[ace_tensorpot_gpu]`` extra, which
+genuinely isn't portable: it needs its own dedicated environment, pinned to
+Python <=3.10, installed from a specific git snapshot -- see
+``pyproject.toml``'s comment on that extra).
 
 Shipped and executed on the cluster by
 :class:`lammps_al.select.selector.CommitteeUncertaintySelector` -- it is not
@@ -83,8 +83,7 @@ def _fix_tensorflow_gpu_libs() -> None:
     packages (and their real ``.so`` files) are genuinely installed, but
     ``LD_LIBRARY_PATH`` doesn't include their directories and TF's RPATH-
     based auto-discovery of sibling ``nvidia-*-cu12`` packages isn't
-    finding them either in this env -- confirmed by direct testing (see
-    ``experiments/rough_cu_water_al/build/tp_ace_diag/RESULTS.md``).
+    finding them either in this env -- confirmed by direct testing.
     Without this, TensorFlow silently falls back to CPU
     (``Cannot dlopen some GPU libraries... Skipping registering GPU
     devices``) even inside a real ``--gres=gpu`` SLURM allocation.
@@ -282,8 +281,7 @@ def _committee_force_stdev(backend: str, atoms, calculator) -> np.ndarray:
 
 def _build_ace_tensorpotential_models(model_files: list, device: str) -> list:
     """One ``TensorPotential`` per ACE committee member -- the GPU-capable
-    replacement for ``PyACEEnsembleCalculator`` (see the module docstring
-    and ``experiments/rough_cu_water_al/build/tp_ace_diag/RESULTS.md``).
+    replacement for ``PyACEEnsembleCalculator`` (see the module docstring).
 
     Built once per :func:`annotate_uncertainties` call and reused across
     every trajectory frame. ``TensorPotential._evaluate`` is a

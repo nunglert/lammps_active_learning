@@ -489,9 +489,8 @@ def test_annotate_uncertainties_ace_backend_uses_tensorpotential(
     """backend="ace" must route through _build_ace_tensorpotential_models /
     _ace_committee_force_stdev (tensorpotential, GPU-capable), NOT
     _build_committee_calculator's PyACEEnsembleCalculator path (CPU-only,
-    confirmed unusably slow on the real campaign system) -- see the module
-    docstring and experiments/rough_cu_water_al/build/tp_ace_diag/
-    RESULTS.md."""
+    confirmed unusably slow on the real campaign system) -- see the
+    module docstring."""
     n_atoms = 4
     _install_fake_ace_tensorpotential_stack(
         monkeypatch,

@@ -40,13 +40,21 @@ grace = [
 mace = [
     "remote_handler[mace_freeze] @ git+ssh://git@gitlab.tuwien.ac.at/e165-03-1_theoretische_materialchemie/madsen-s-research-group/remote_handler.git@dev-NU",
 ]
-# GPU-accelerated ACE fitting (pacemaker's `tensorpot` backend via the
-# *old*, pre-GRACE-rename tensorpotential API -- see remote_handler's own
-# [ace_tensorpot_gpu] extra comment. Install in its
+# GPU-accelerated ACE fitting (pacemaker's `tensorpot` backend) AND
+# GPU-accelerated ACE committee-uncertainty scoring
+# (lammps_al.select.scripts.committee_selection's backend="ace" path) --
+# both via the *old*, pre-GRACE-rename tensorpotential API (see
+# remote_handler's own [ace_tensorpot_gpu] extra comment). Install in its
 # own dedicated environment -- mutually exclusive with [grace] (see above).
-# Deliberately NOT included in [all], for the same reason.
+# Deliberately NOT included in [all], for the same reason. matscipy (a
+# normal, portable PyPI package -- unlike the old tensorpotential snapshot,
+# no special version pins) is declared directly here since it's a direct
+# dependency of this repo's own committee_selection payload, not something
+# remote_handler needs to know about; confirmed substantially faster than
+# ASE's own neighbor list at real campaign scale.
 ace_tensorpot_gpu = [
     "remote_handler[ace_tensorpot_gpu] @ git+ssh://git@gitlab.tuwien.ac.at/e165-03-1_theoretische_materialchemie/madsen-s-research-group/remote_handler.git@dev-NU",
+    "matscipy",
 ]
 embedding = [
     "ovito"
