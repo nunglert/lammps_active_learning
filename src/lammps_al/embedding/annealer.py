@@ -64,7 +64,13 @@ class EmbeddingAnnealer(Sampler):
         lammps_path: Path to the LAMMPS executable
         pair_style: LAMMPS ``pair_style`` line contents
         pair_coeff_path: Path to the potential file or directory (e.g. a
-            GRACE model, normally saved as a directory)
+            GRACE model, normally saved as a directory), or ``None`` to
+            require it be supplied per-iteration via ``update()``'s
+            ``pair_coeff_path`` kwarg instead (wired from a ``Stage``'s
+            ``extra_inputs``, the same mechanism
+            ``CommitteeUncertaintySelector`` uses for its committee -- see
+            that class's module docstring). A per-call value always
+            overrides this constructor default, not just fills a gap.
         species: Element symbols in LAMMPS type order. Must match the
             ``specorder`` given to the upstream ``ROIExtractor`` exactly --
             the anneal deck fixes LAMMPS type order to this list (mass /
@@ -163,11 +169,11 @@ class EmbeddingAnnealer(Sampler):
         cluster_config: ClusterConfig,
         lammps_path: os.PathLike,
         pair_style: str,
-        pair_coeff_path: os.PathLike,
         species: list[str],
         masses: list[float],
         anneal_stages: list[dict],
         anneal_cutoff: float,
+        pair_coeff_path: Optional[os.PathLike] = None,
         topology_mode: str = "bulk",
         anneal_template_path: Optional[os.PathLike] = None,
         roi_repel_margin: float = 0.5,
@@ -226,7 +232,11 @@ class EmbeddingAnnealer(Sampler):
         self.stub = stub
 
     def update(
-        self, calcdir: Path, sampler_input: Path | list[Path], **kwargs
+        self,
+        calcdir: Path,
+        sampler_input: Path | list[Path],
+        pair_coeff_path: Optional[Path | list[Path]] = None,
+        **kwargs,
     ) -> None:
         """
         Stage one anneal task per box in the extractor's manifest.
@@ -236,8 +246,29 @@ class EmbeddingAnnealer(Sampler):
             sampler_input: Directory produced by
                 ``ROIExtractor.get_selected_configs()`` -- must contain
                 ``manifest.json`` plus every carved-box data file it lists.
+            pair_coeff_path: The potential to anneal with, resolved via a
+                ``Stage``'s ``extra_inputs`` (same mechanism
+                ``CommitteeUncertaintySelector`` uses for its committee) --
+                not this stage's primary ring input. Overrides the
+                constructor default for this iteration; a list (e.g. every
+                committee member from the "trainer" stage) picks its first
+                entry, since annealing drives a single ``pair_style``/
+                ``pair_coeff``, not a committee.
             **kwargs: Additional parameters
         """
+        if pair_coeff_path is not None:
+            self.pair_coeff_path = (
+                pair_coeff_path[0]
+                if isinstance(pair_coeff_path, list)
+                else pair_coeff_path
+            )
+        if self.pair_coeff_path is None:
+            raise WorkflowError(
+                "EmbeddingAnnealer.update() needs a 'pair_coeff_path' -- "
+                "either at construction time or wired via the Stage's "
+                "extra_inputs."
+            )
+
         extract_out = Path(
             sampler_input
             if isinstance(sampler_input, (str, Path))

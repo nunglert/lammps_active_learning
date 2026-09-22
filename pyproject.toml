@@ -56,6 +56,12 @@ ace_tensorpot_gpu = [
     "remote_handler[ace_tensorpot_gpu] @ git+ssh://git@gitlab.tuwien.ac.at/e165-03-1_theoretische_materialchemie/madsen-s-research-group/remote_handler.git@dev-NU",
     "matscipy",
 ]
+# ovito's plain PyPI wheel doesn't bundle its own Qt/OpenGL libs and fails
+# to import on a headless cluster node missing system libOpenGL.so.0
+# (confirmed on dirona) -- install it via conda instead (ovito's own
+# import-time warning recommends this too: "conda install
+# --strict-channel-priority -c https://conda.ovito.org -c conda-forge
+# ovito=3.16.1"), then `pip install` this extra as normal
 embedding = [
     "ovito"
 ]
