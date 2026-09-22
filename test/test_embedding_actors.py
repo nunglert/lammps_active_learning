@@ -127,6 +127,31 @@ def test_roi_extractor_writes_specorder_to_extract_input(
     assert written["specorder"] == specorder
 
 
+def test_roi_extractor_writes_phase_cutoff(
+    tmp_path, mock_remote_fs, mock_cluster_config, monkeypatch
+):
+    """phase_cutoff must reach the extract input JSON so extract.py's
+    find_rois() call can apply the phase-proximity filter."""
+    monkeypatch.setattr(
+        "lammps_al.embedding.extractor.SingleScriptTask", MagicMock()
+    )
+    extractor = ROIExtractor(
+        **_extractor_kwargs(
+            mock_remote_fs,
+            mock_cluster_config,
+            phase_species=["Cu"],
+            phase_cutoff=6.0,
+            stub=False,
+        )
+    )
+
+    extractor.update(tmp_path, tmp_path / "traj.xyz")
+
+    written = json.loads(extractor.extract_input_file.read_text())
+    assert written["phase_species"] == ["Cu"]
+    assert written["phase_cutoff"] == 6.0
+
+
 def test_roi_extractor_writes_normal_patch_radius(
     tmp_path, mock_remote_fs, mock_cluster_config, monkeypatch
 ):

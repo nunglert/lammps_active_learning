@@ -86,6 +86,76 @@ def test_find_rois_no_atoms_above_threshold():
     assert find_rois(atoms, threshold=10.0, cluster_cutoff=1.0) == []
 
 
+def _tagged_atoms_two_clusters_mixed_species():
+    """Two high-uncertainty clusters: one near a Cu atom, one far from any
+    Cu (well beyond any reasonable phase_cutoff) -- for the phase-proximity
+    filter tests below."""
+    rng = np.random.default_rng(0)
+    n = 100
+    positions = rng.uniform(0, 20, (n, 3))
+    symbols = ["H"] * n
+    symbols[20] = "Cu"  # near cluster A's peak, below
+    atoms = Atoms(symbols, positions=positions, cell=[40, 40, 40], pbc=True)
+    unc = np.zeros(n)
+
+    # cluster A: peak at index 11, 0.5A from the Cu atom (index 20)
+    atoms.positions[10] = [5.0, 5.0, 5.0]
+    atoms.positions[11] = [5.5, 5.0, 5.0]
+    atoms.positions[12] = [5.0, 5.5, 5.0]
+    unc[[10, 11, 12]] = [0.5, 0.9, 0.3]
+    atoms.positions[20] = [6.0, 5.0, 5.0]
+
+    # cluster B: peak at index 50, ~19A (periodic min-image) from that Cu
+    # atom -- no Cu anywhere nearby.
+    atoms.positions[50] = [35.0, 35.0, 35.0]
+    atoms.positions[51] = [35.3, 35.0, 35.0]
+    unc[[50, 51]] = [0.7, 0.6]
+
+    atoms.arrays["uncertainty"] = unc
+    return atoms
+
+
+def test_find_rois_phase_filter_excludes_far_cluster():
+    atoms = _tagged_atoms_two_clusters_mixed_species()
+    rois = find_rois(
+        atoms,
+        threshold=0.2,
+        cluster_cutoff=1.0,
+        phase_species=["Cu"],
+        phase_cutoff=2.0,
+    )
+    assert rois == [11]
+
+
+def test_find_rois_phase_filter_none_keeps_both_clusters():
+    # Baseline: no phase filter applied, both clusters' peaks come back
+    # (same behavior as before this filter existed).
+    atoms = _tagged_atoms_two_clusters_mixed_species()
+    rois = find_rois(atoms, threshold=0.2, cluster_cutoff=1.0)
+    assert rois == [11, 50]
+
+
+def test_find_rois_phase_filter_no_matching_species_returns_empty():
+    atoms = _tagged_atoms_two_clusters_mixed_species()
+    rois = find_rois(
+        atoms,
+        threshold=0.2,
+        cluster_cutoff=1.0,
+        phase_species=["Au"],  # not present anywhere in this structure
+        phase_cutoff=2.0,
+    )
+    assert rois == []
+
+
+def test_find_rois_phase_cutoff_without_phase_species_warns_and_ignores():
+    atoms = _tagged_atoms_two_clusters_mixed_species()
+    with pytest.warns(UserWarning, match="given together"):
+        rois = find_rois(
+            atoms, threshold=0.2, cluster_cutoff=1.0, phase_cutoff=2.0
+        )
+    assert rois == [11, 50]
+
+
 def test_carve_box_centers_and_sizes_correctly():
     atoms = _tagged_atoms_two_clusters()
     box = BoxDims(x=4, y=4, z_below=4, z_above=6)

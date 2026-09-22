@@ -51,6 +51,37 @@ def test_matrix_embedding_input_normal_patch_radius_must_be_positive():
         cfg.validate()
 
 
+def test_matrix_embedding_input_phase_cutoff_must_be_positive():
+    cfg = MatrixEmbeddingInput(
+        trajectory="traj.xyz",
+        threshold=0.1,
+        cluster_cutoff=3.0,
+        box_x=8,
+        box_y=8,
+        box_z_below=8,
+        protect_radius=4.0,
+        phase_species=["Cu"],
+        phase_cutoff=0.0,
+    )
+    with pytest.raises(ScriptInputError, match="phase_cutoff"):
+        cfg.validate()
+
+
+def test_matrix_embedding_input_phase_cutoff_requires_phase_species():
+    cfg = MatrixEmbeddingInput(
+        trajectory="traj.xyz",
+        threshold=0.1,
+        cluster_cutoff=3.0,
+        box_x=8,
+        box_y=8,
+        box_z_below=8,
+        protect_radius=4.0,
+        phase_cutoff=5.0,
+    )
+    with pytest.raises(ScriptInputError, match="phase_species"):
+        cfg.validate()
+
+
 def test_matrix_embedding_input_interface_requires_remove_species():
     cfg = MatrixEmbeddingInput(
         trajectory="traj.xyz",

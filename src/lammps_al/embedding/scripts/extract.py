@@ -65,7 +65,11 @@ count = 0
 
 for frame_idx, atoms in enumerate(trajectory):
     roi_indices = find_rois(
-        atoms, input_config.threshold, input_config.cluster_cutoff
+        atoms,
+        input_config.threshold,
+        input_config.cluster_cutoff,
+        phase_species=input_config.phase_species,
+        phase_cutoff=input_config.phase_cutoff,
     )
     for roi_index in roi_indices:
         roi_position_orig = atoms.get_positions()[roi_index]

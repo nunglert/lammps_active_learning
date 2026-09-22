@@ -87,8 +87,16 @@ class ROIExtractor(Selector):
             see ``MatrixEmbeddingInput``
         remove_species: Phase stripped (on an internal OVITO copy) before
             meshing for the interface normal. Required for ``"interface"``.
-        phase_species: Species defining the condensed phase, used only by
-            the normal-detection fallback heuristic
+        phase_species: Species defining the condensed phase. Used by the
+            normal-detection fallback heuristic, and (together with
+            ``phase_cutoff``) to restrict ROI candidates to high-uncertainty
+            atoms actually near this phase.
+        phase_cutoff: Distance (Angstrom) for the ``phase_species``
+            proximity filter (see ``geometry.find_rois``) -- keeps ROIs out
+            of a bulk single-phase region with no condensed-phase core for
+            ``EmbeddingAnnealer``'s frozen-sphere anneal to work with.
+            Required together with ``phase_species`` for the filter to
+            apply; ``None`` (default) applies no filter.
         cleanup_mode: ``"none"``, ``"molecule"``, or ``"stoichiometry"``
         solvent: For ``cleanup_mode="molecule"``: either an ASE ``Atoms``
             solvent template (staged and sent as a file) or an
@@ -124,6 +132,7 @@ class ROIExtractor(Selector):
         topology_mode: str = "bulk",
         remove_species: Optional[list[str]] = None,
         phase_species: Optional[list[str]] = None,
+        phase_cutoff: Optional[float] = None,
         cleanup_mode: str = "none",
         solvent: Optional[Union[Atoms, str]] = None,
         stoichiometry: Optional[dict[str, int]] = None,
@@ -155,6 +164,7 @@ class ROIExtractor(Selector):
         self.topology_mode = topology_mode
         self.remove_species = remove_species
         self.phase_species = phase_species
+        self.phase_cutoff = phase_cutoff
         self.cleanup_mode = cleanup_mode
         self.solvent = solvent
         self.stoichiometry = stoichiometry
@@ -240,6 +250,7 @@ class ROIExtractor(Selector):
             "topology_mode": self.topology_mode,
             "remove_species": self.remove_species,
             "phase_species": self.phase_species,
+            "phase_cutoff": self.phase_cutoff,
             "cleanup_mode": self.cleanup_mode,
             "solvent_label": solvent_label,
             "stoichiometry": self.stoichiometry,

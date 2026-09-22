@@ -39,7 +39,11 @@ class BoxDims:
 
 
 def find_rois(
-    atoms: Atoms, threshold: float, cluster_cutoff: float
+    atoms: Atoms,
+    threshold: float,
+    cluster_cutoff: float,
+    phase_species: Optional[list[str]] = None,
+    phase_cutoff: Optional[float] = None,
 ) -> list[int]:
     """Cluster high-uncertainty atoms and return one peak index per cluster.
 
@@ -53,6 +57,21 @@ def find_rois(
         threshold: Minimum uncertainty for an atom to seed a cluster.
         cluster_cutoff: Distance (Angstrom) under which two high-uncertainty
             atoms are considered part of the same region of interest.
+        phase_species: When given (together with ``phase_cutoff``),
+            restricts candidates to high-uncertainty atoms within
+            ``phase_cutoff`` of at least one atom of these species --
+            keeps an interface-oriented extraction (carved boxes need a
+            condensed-phase core for ``EmbeddingAnnealer``'s frozen-sphere
+            anneal) from picking ROIs deep in a bulk single-phase region
+            with no such core nearby (confirmed against a real campaign
+            trajectory, 2026-09-22: an uncalibrated ``threshold`` let
+            through ROIs 50+ A from the nearest condensed-phase atom).
+            ``None`` (with ``phase_cutoff``) applies no filter -- the
+            right choice for ``topology_mode="bulk"``, where there's no
+            separate phase to be near.
+        phase_cutoff: Distance (Angstrom) for the ``phase_species`` filter
+            above. Required together with ``phase_species``; ignored (with
+            a warning) if given alone.
 
     Returns:
         Sorted list of atom indices (into ``atoms``), one per cluster, each
@@ -62,6 +81,24 @@ def find_rois(
     indices = np.where(uncertainty > threshold)[0]
     if len(indices) == 0:
         return []
+
+    if phase_species is not None and phase_cutoff is not None:
+        symbols = np.asarray(atoms.get_chemical_symbols())
+        phase_indices = np.where(np.isin(symbols, phase_species))[0]
+        if len(phase_indices) == 0:
+            return []
+        near = _near_any(atoms, indices, phase_indices, phase_cutoff)
+        indices = indices[near]
+        if len(indices) == 0:
+            return []
+    elif phase_species is not None or phase_cutoff is not None:
+        import warnings
+
+        warnings.warn(
+            "find_rois: phase_species and phase_cutoff must be given "
+            "together to apply the proximity filter -- got only one, "
+            "applying no filter."
+        )
 
     sub = atoms[indices]
     i_idx, j_idx = neighbor_list("ij", sub, cluster_cutoff)
@@ -92,6 +129,55 @@ def find_rois(
         peak_local = members[int(np.argmax(local_unc))]
         rois.append(int(indices[peak_local]))
     return sorted(rois)
+
+
+def _near_any(
+    atoms: Atoms,
+    candidate_indices: np.ndarray,
+    target_indices: np.ndarray,
+    cutoff: float,
+) -> np.ndarray:
+    """Boolean mask (aligned with ``candidate_indices``): whether each
+    candidate atom has a ``target_indices`` atom within ``cutoff``,
+    periodic-aware.
+
+    Builds a small combined sub-structure (candidates + targets) rather
+    than an all-pairs distance matrix over the full (possibly
+    ~200k-atom) ``atoms`` -- the latter is exactly the O(n_atoms^2)
+    memory blowup already found and fixed elsewhere in this codebase
+    (``committee_selection.aggregate_uncertainties``). A candidate that is
+    itself a target atom (e.g. a condensed-phase atom whose own
+    uncertainty exceeds threshold) is trivially "near" via the resulting
+    zero-distance pair between its two copies in the combined structure --
+    no special-casing needed.
+
+    Prefers matscipy's neighbor list (confirmed ~13x faster, and far less
+    memory-hungry, than ase's own at real campaign scale -- see
+    ``committee_selection._tp_atoms_from_matscipy``'s docstring; confirmed
+    directly here too: ase's own neighbor list needed ~100GB/83s for one
+    real ~270k-atom candidates+targets structure at cutoff=6.0, vs. a few
+    seconds/GB expected from matscipy), falling back to
+    ``ase.neighborlist`` when matscipy isn't installed -- unlike the
+    ``ace`` backend's own neighbor list, this isn't guaranteed present
+    (only via ``[ace_tensorpot_gpu]``, not ``[embedding]``/``[all]``).
+    """
+    combined = atoms[np.concatenate([candidate_indices, target_indices])]
+    n_cand = len(candidate_indices)
+    try:
+        from matscipy.neighbours import neighbour_list
+
+        i_idx, j_idx = neighbour_list("ij", combined, cutoff)
+    except ImportError:
+        i_idx, j_idx = neighbor_list("ij", combined, cutoff)
+
+    near = np.zeros(n_cand, dtype=bool)
+    from_cand = i_idx < n_cand
+    to_target = j_idx >= n_cand
+    near[i_idx[from_cand & to_target]] = True
+    from_cand = j_idx < n_cand
+    to_target = i_idx >= n_cand
+    near[j_idx[from_cand & to_target]] = True
+    return near
 
 
 def _periodic_neighborhood(

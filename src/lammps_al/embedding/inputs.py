@@ -54,9 +54,17 @@ class MatrixEmbeddingInput(ScriptInput):
             OVITO copy to expose a mesh at the interface plane).
         remove_species: Phase to strip before meshing. Required when
             ``topology_mode="interface"``.
-        phase_species: Species defining the condensed phase, used only by
-            the species-COM fallback heuristic if OVITO mesh construction
-            fails.
+        phase_species: Species defining the condensed phase. Used by the
+            species-COM fallback heuristic if OVITO mesh construction
+            fails, and (together with ``phase_cutoff``) to restrict ROI
+            candidates to high-uncertainty atoms actually near this phase.
+        phase_cutoff: Distance (Angstrom) for the ``phase_species``
+            proximity filter in :func:`find_rois` -- keeps ROIs out of a
+            bulk single-phase region with no condensed-phase core for
+            ``EmbeddingAnnealer``'s frozen-sphere anneal to work with.
+            Required together with ``phase_species`` for the filter to
+            apply; ``None`` (with ``phase_species=None``) applies no
+            filter, the right choice for ``topology_mode="bulk"``.
         cleanup_mode: ``"none"`` (raw cut box), ``"molecule"`` (reform
             molecules broken by the cut using a solvent template), or
             ``"stoichiometry"`` (trim the matrix to a target ratio).
@@ -98,6 +106,7 @@ class MatrixEmbeddingInput(ScriptInput):
     topology_mode: str = "bulk"
     remove_species: Optional[list[str]] = None
     phase_species: Optional[list[str]] = None
+    phase_cutoff: Optional[float] = None
     cleanup_mode: str = "none"
     solvent_label: Optional[str] = None
     solvent_file: Optional[Path] = None
@@ -151,6 +160,16 @@ class MatrixEmbeddingInput(ScriptInput):
             raise ScriptInputError(
                 "normal_patch_radius must be positive if given"
             )
+
+        if self.phase_cutoff is not None:
+            if self.phase_cutoff <= 0:
+                raise ScriptInputError(
+                    "phase_cutoff must be positive if given"
+                )
+            if not self.phase_species:
+                raise ScriptInputError(
+                    "phase_cutoff requires phase_species to also be given"
+                )
 
         if self.buffer < 0:
             raise ScriptInputError("buffer must be non-negative")
