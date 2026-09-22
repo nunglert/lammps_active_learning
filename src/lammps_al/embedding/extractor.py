@@ -242,15 +242,21 @@ class ROIExtractor(Selector):
             "phase_species": self.phase_species,
             "cleanup_mode": self.cleanup_mode,
             "solvent_label": solvent_label,
-            "solvent_file": (
-                solvent_file.name if solvent_file is not None else None
-            ),
             "stoichiometry": self.stoichiometry,
             "specorder": self.specorder,
             "smoothing_level": self.smoothing_level,
             "mesh_radius": self.mesh_radius,
             "normal_patch_radius": self.normal_patch_radius,
         }
+        # Omit rather than write null: remote_handler's ScriptInput.from_dict
+        # Path()-converts every _path_fields key present in the JSON
+        # unconditionally, even when its value is null, raising a TypeError
+        # (confirmed against a real embed_extract job, 2026-09-22) --
+        # solvent_file is declared Optional specifically for campaigns like
+        # this one that use solvent_label instead, so it must stay absent
+        # from the JSON when unset, not present-as-null.
+        if solvent_file is not None:
+            script_input["solvent_file"] = solvent_file.name
 
         self.extract_input_file = self.extract_dir / "input_embedding.json"
         with open(self.extract_input_file, "w") as f:
