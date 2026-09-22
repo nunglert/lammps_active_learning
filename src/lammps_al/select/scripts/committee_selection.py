@@ -157,15 +157,32 @@ def aggregate_uncertainties(
 
     Returns:
         Aggregated uncertainties for each atom, shape=(n_atoms)
-    """
-    import ase.geometry
 
-    radii = ase.geometry.get_distances(
-        atom_pos, cell=unit_cell, pbc=boundary_conditions
-    )[1]
-    mask = radii < r_cut
+    Uses a cutoff-aware neighbor list, not an all-pairs distance matrix.
+    """
+    from ase import Atoms
+
+    n_atoms = len(atom_pos)
     unc_mean = atomic_uncertainties.mean(axis=-1)
-    return (mask * unc_mean[np.newaxis, :]).sum(axis=1) / mask.sum(axis=1)
+
+    dummy = Atoms(positions=atom_pos, cell=unit_cell, pbc=boundary_conditions)
+    try:
+        from matscipy.neighbours import neighbour_list
+
+        ind_i, ind_j = neighbour_list("ij", dummy, r_cut)
+    except ImportError:
+        from ase.neighborlist import neighbor_list
+
+        ind_i, ind_j = neighbor_list("ij", dummy, r_cut)
+
+    # Neighbor lists exclude self-pairs; the original all-pairs mask always
+    # included the atom itself (distance 0 < r_cut), so add it back here.
+    counts = np.bincount(ind_i, minlength=n_atoms).astype(float) + 1.0
+    sums = (
+        np.bincount(ind_i, weights=unc_mean[ind_j], minlength=n_atoms)
+        + unc_mean
+    )
+    return sums / counts
 
 
 def select_max_uncertainty_frames(structs: list, bin_count: int) -> list:

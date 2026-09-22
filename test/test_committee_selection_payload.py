@@ -92,6 +92,25 @@ def test_aggregate_uncertainties_small_cutoff_is_local():
     np.testing.assert_allclose(agg, [3.0, 1.0])
 
 
+def test_aggregate_uncertainties_falls_back_to_ase_without_matscipy(
+    monkeypatch,
+):
+    # matscipy isn't guaranteed present outside the "ace" backend's
+    # [ace_tensorpot_gpu] extra -- force the ImportError branch and confirm
+    # the ase.neighborlist fallback gives the same result.
+    monkeypatch.setitem(sys.modules, "matscipy", None)
+    pos = np.array([[0.0, 0.0, 0.0], [0.0, 0.0, 1.0]])
+    cell = np.eye(3) * 20.0
+    pbc = np.array([False, False, False])
+    atomic_unc = np.array([[3.0, 3.0, 3.0], [1.0, 1.0, 1.0]])
+
+    agg = payload.aggregate_uncertainties(
+        pos, cell, pbc, atomic_unc, r_cut=1.5
+    )
+
+    np.testing.assert_allclose(agg, [2.0, 2.0])
+
+
 # --- select_max_uncertainty_frames ----------------------------------------
 def _frame(uncertainties, tag):
     at = Atoms(
@@ -389,12 +408,14 @@ def _install_fake_ace_tensorpotential_stack(monkeypatch, member_forces):
     neighbours = types.ModuleType("matscipy.neighbours")
 
     def _fake_neighbour_list(quantities, atoms, cutoff):
-        assert quantities == "ijS"
+        assert quantities in ("ijS", "ij")
         n = len(atoms)
         i, j = np.meshgrid(np.arange(n), np.arange(n), indexing="ij")
         mask = i != j
         ind_i = i[mask].astype(np.int32)
         ind_j = j[mask].astype(np.int32)
+        if quantities == "ij":
+            return ind_i, ind_j
         offsets = np.zeros((len(ind_i), 3), dtype=np.float64)
         return ind_i, ind_j, offsets
 
