@@ -86,6 +86,19 @@ class MatrixEmbeddingInput(ScriptInput):
             ``surface_mesh.detect_normal``). This smooths local atomic-scale
             roughness without mixing in a disconnected nearby surface.
             ``None`` (default) uses ``protect_radius``.
+        max_num_structures: Caps the total number of carved boxes across the
+            whole trajectory. When the number of ROIs :func:`find_rois`
+            turns up (summed over every frame) exceeds this, only the
+            ``max_num_structures`` with the highest per-atom uncertainty are
+            actually carved/cleaned/written -- the rest are dropped before
+            any of that per-ROI work runs (confirmed needed, 2026-09-22: an
+            uncalibrated ``threshold`` combined with a rough, multi-island
+            interface produced 913 ROIs from a single 101-frame trajectory,
+            ~9x the previous iteration's batch, each one becoming its own
+            downstream ``EmbeddingAnnealer`` SLURM job). Ranking by
+            uncertainty (not e.g. frame order) keeps the genuinely most
+            informative configs regardless of where in the trajectory they
+            fall. ``None`` (default) applies no cap.
 
     Example:
         >>> config = MatrixEmbeddingInput.from_file(Path("input.json"))
@@ -115,6 +128,7 @@ class MatrixEmbeddingInput(ScriptInput):
     smoothing_level: int = 8
     mesh_radius: Optional[float] = None
     normal_patch_radius: Optional[float] = None
+    max_num_structures: Optional[int] = None
 
     def validate(self, root: Optional[Path] = None) -> None:
         """Validate configuration parameters.
@@ -170,6 +184,14 @@ class MatrixEmbeddingInput(ScriptInput):
                 raise ScriptInputError(
                     "phase_cutoff requires phase_species to also be given"
                 )
+
+        if (
+            self.max_num_structures is not None
+            and self.max_num_structures <= 0
+        ):
+            raise ScriptInputError(
+                "max_num_structures must be positive if given"
+            )
 
         if self.buffer < 0:
             raise ScriptInputError("buffer must be non-negative")

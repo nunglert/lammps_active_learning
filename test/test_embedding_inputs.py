@@ -82,6 +82,35 @@ def test_matrix_embedding_input_phase_cutoff_requires_phase_species():
         cfg.validate()
 
 
+def test_matrix_embedding_input_max_num_structures_must_be_positive():
+    cfg = MatrixEmbeddingInput(
+        trajectory="traj.xyz",
+        threshold=0.1,
+        cluster_cutoff=3.0,
+        box_x=8,
+        box_y=8,
+        box_z_below=8,
+        protect_radius=4.0,
+        max_num_structures=0,
+    )
+    with pytest.raises(ScriptInputError, match="max_num_structures"):
+        cfg.validate()
+
+
+def test_matrix_embedding_input_max_num_structures_none_is_valid():
+    cfg = MatrixEmbeddingInput(
+        trajectory="traj.xyz",
+        threshold=0.1,
+        cluster_cutoff=3.0,
+        box_x=8,
+        box_y=8,
+        box_z_below=8,
+        protect_radius=4.0,
+        max_num_structures=None,
+    )
+    cfg.validate()  # should not raise
+
+
 def test_matrix_embedding_input_interface_requires_remove_species():
     cfg = MatrixEmbeddingInput(
         trajectory="traj.xyz",

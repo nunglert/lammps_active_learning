@@ -5,15 +5,40 @@ input file (path passed as ``sys.argv[1]``), reads an uncertainty-tagged
 trajectory, extracts one carved box per region of interest (ROI) per frame,
 and writes each to ``out/`` as both ``lammps-data`` (for the anneal step) and
 ``extxyz``, alongside a ``manifest.json`` describing every carved box.
+
+Streams the trajectory via ``ase.io.iread`` in two passes rather than
+``ase.io.read(index=":")`` once -- a real campaign trajectory here is
+multi-GB (a full-frame-count, uncertainty-tagged dump, not a handful of
+pre-picked peak frames, by design -- see ``CommitteeUncertaintySelector``'s
+module docstring), and loading every frame into memory at once was a real,
+avoidable memory cost given each phase only ever needs one frame at a time.
+Pass 1 (:func:`find_rois` only, no carving) needs every frame exactly once,
+in order -- a plain streaming scan. Pass 2 needs only whichever frames
+survived ``max_num_structures``' cap, so it re-scans from the start and
+skips any frame not in that (typically much smaller) set, rather than
+keeping the full trajectory resident between passes. This trades one extra
+sequential file read for peak memory bounded by a single frame instead of
+the whole trajectory.
 """
 
 import json
+import logging
 import os
 import sys
+import time
+from itertools import groupby
 from pathlib import Path
 
 import ase.io
 import numpy as np
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="[%(asctime)s] %(message)s",
+    datefmt="%H:%M:%S",
+    stream=sys.stdout,
+)
+logger = logging.getLogger(__name__)
 
 INPUTFILE = Path(sys.argv[1])
 calcpath = INPUTFILE.parent
@@ -22,7 +47,12 @@ from remote_handler.exceptions import ScriptInputError
 
 from lammps_al.embedding.inputs import MatrixEmbeddingInput
 from lammps_al.embedding.scripts.cleanup import cleanup
-from lammps_al.embedding.scripts.geometry import BoxDims, carve_box, find_rois
+from lammps_al.embedding.scripts.geometry import (
+    BoxDims,
+    cap_rois_by_uncertainty,
+    carve_box,
+    find_rois,
+)
 from lammps_al.embedding.scripts.surface_mesh import detect_normal
 
 input_config = MatrixEmbeddingInput.from_file(INPUTFILE)
@@ -33,16 +63,7 @@ outpath = calcpath / "out"
 # abort before doing any work.
 os.makedirs(outpath, exist_ok=True)
 
-trajectory = ase.io.read(calcpath / input_config.trajectory, index=":")
-
-for frame_idx, atoms in enumerate(trajectory):
-    if "uncertainty" not in atoms.arrays:
-        raise ScriptInputError(
-            f"Trajectory frame {frame_idx} of "
-            f"'{input_config.trajectory}' has no per-atom 'uncertainty' "
-            "array; the embedding sampler requires an uncertainty-tagged "
-            "trajectory."
-        )
+trajectory_path = calcpath / input_config.trajectory
 
 solvent = None
 if input_config.cleanup_mode == "molecule":
@@ -60,10 +81,25 @@ box_dims = BoxDims(
     z_above=input_config.box_z_above,
 )
 
-manifest = []
-count = 0
+# Phase 1: find every ROI across the whole trajectory -- cheap (find_rois
+# only, no carve/OVITO/cleanup) -- so max_num_structures can cap by global
+# uncertainty rank before any of the expensive per-ROI work runs.
+logger.info("scanning trajectory %s for ROIs ...", input_config.trajectory)
+t_start = time.monotonic()
+candidates: list[tuple[int, int, float]] = []
+n_frames = 0
 
-for frame_idx, atoms in enumerate(trajectory):
+for frame_idx, atoms in enumerate(ase.io.iread(trajectory_path, index=":")):
+    if "uncertainty" not in atoms.arrays:
+        raise ScriptInputError(
+            f"Trajectory frame {frame_idx} of "
+            f"'{input_config.trajectory}' has no per-atom 'uncertainty' "
+            "array; the embedding sampler requires an uncertainty-tagged "
+            "trajectory."
+        )
+    n_frames += 1
+
+    t_frame = time.monotonic()
     roi_indices = find_rois(
         atoms,
         input_config.threshold,
@@ -71,7 +107,58 @@ for frame_idx, atoms in enumerate(trajectory):
         phase_species=input_config.phase_species,
         phase_cutoff=input_config.phase_cutoff,
     )
-    for roi_index in roi_indices:
+    uncertainty = atoms.arrays["uncertainty"]
+    candidates.extend(
+        (frame_idx, int(roi_index), float(uncertainty[roi_index]))
+        for roi_index in roi_indices
+    )
+    logger.info(
+        "frame %d: %d ROI(s) (find_rois %.1fs, %d candidates so far, "
+        "%.1fs elapsed)",
+        frame_idx,
+        len(roi_indices),
+        time.monotonic() - t_frame,
+        len(candidates),
+        time.monotonic() - t_start,
+    )
+
+logger.info(
+    "found %d candidate ROI(s) across %d frames in %.1fs",
+    len(candidates),
+    n_frames,
+    time.monotonic() - t_start,
+)
+
+capped = cap_rois_by_uncertainty(candidates, input_config.max_num_structures)
+if len(capped) < len(candidates):
+    logger.info(
+        "max_num_structures=%d: keeping the %d highest-uncertainty ROI(s), "
+        "dropping %d",
+        input_config.max_num_structures,
+        len(capped),
+        len(candidates) - len(capped),
+    )
+
+# Phase 2: re-scan the trajectory, carving/cleaning/writing only the frames
+# that still have a surviving ROI after the cap. `capped` is already sorted
+# by (frame_idx, roi_index) (cap_rois_by_uncertainty's contract), so a
+# single second streaming pass -- skipping any frame with nothing to do --
+# suffices; no random access into the trajectory is needed.
+rois_by_frame = {
+    frame_idx: list(group)
+    for frame_idx, group in groupby(capped, key=lambda c: c[0])
+}
+
+manifest = []
+count = 0
+t_carve = time.monotonic()
+
+for frame_idx, atoms in enumerate(ase.io.iread(trajectory_path, index=":")):
+    frame_rois = rois_by_frame.get(frame_idx)
+    if not frame_rois:
+        continue
+
+    for _, roi_index, _unc in frame_rois:
         roi_position_orig = atoms.get_positions()[roi_index]
 
         normal = None
@@ -134,9 +221,23 @@ for frame_idx, atoms in enumerate(trajectory):
             }
         )
         count += 1
+        if count % 10 == 0 or count == len(capped):
+            logger.info(
+                "carved %d/%d boxes (%.1fs elapsed)",
+                count,
+                len(capped),
+                time.monotonic() - t_carve,
+            )
 
 with open(outpath / "manifest.json", "w") as f:
     json.dump(manifest, f, indent=2)
+
+logger.info(
+    "done: %d boxes extracted from %d frames in %.1fs",
+    count,
+    n_frames,
+    time.monotonic() - t_start,
+)
 
 # Success marker checked by SingleScriptTask.finish_check on the host.
 (calcpath / "is_finished.info").write_text(

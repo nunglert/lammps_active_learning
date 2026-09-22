@@ -101,7 +101,12 @@ def find_rois(
         )
 
     sub = atoms[indices]
-    i_idx, j_idx = neighbor_list("ij", sub, cluster_cutoff)
+    try:
+        from matscipy.neighbours import neighbour_list
+
+        i_idx, j_idx = neighbour_list("ij", sub, cluster_cutoff)
+    except ImportError:
+        i_idx, j_idx = neighbor_list("ij", sub, cluster_cutoff)
 
     parent = list(range(len(indices)))
 
@@ -129,6 +134,33 @@ def find_rois(
         peak_local = members[int(np.argmax(local_unc))]
         rois.append(int(indices[peak_local]))
     return sorted(rois)
+
+
+def cap_rois_by_uncertainty(
+    candidates: list[tuple[int, int, float]],
+    max_num_structures: Optional[int],
+) -> list[tuple[int, int, float]]:
+    """Keep only the ``max_num_structures`` highest-uncertainty ROIs.
+
+    ``candidates`` is ``(frame_index, roi_index, uncertainty)`` per ROI,
+    gathered across every frame of a trajectory (one :func:`find_rois` call
+    per frame). Ranks by ``uncertainty`` (not frame order or discovery
+    order) so a cap keeps the genuinely most informative configs regardless
+    of where in the trajectory they happen to fall -- an early-frames-first
+    truncation would systematically bias toward whatever a trajectory
+    happens to start with. The result is re-sorted back into
+    ``(frame_index, roi_index)`` order, matching ``find_rois``' own
+    convention, so a capped run's manifest/logging still reads in trajectory
+    order rather than uncertainty order.
+
+    ``max_num_structures=None``, or a ``candidates`` list already at or
+    under the cap, returns ``candidates`` unchanged (as a new list).
+    """
+    if max_num_structures is None or len(candidates) <= max_num_structures:
+        return list(candidates)
+    kept = sorted(candidates, key=lambda c: c[2], reverse=True)
+    kept = kept[:max_num_structures]
+    return sorted(kept, key=lambda c: (c[0], c[1]))
 
 
 def _near_any(

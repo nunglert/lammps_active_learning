@@ -26,7 +26,12 @@ from lammps_al.embedding.scripts.cleanup import (
     cleanup_none,
     cleanup_stoichiometry,
 )
-from lammps_al.embedding.scripts.geometry import BoxDims, carve_box, find_rois
+from lammps_al.embedding.scripts.geometry import (
+    BoxDims,
+    cap_rois_by_uncertainty,
+    carve_box,
+    find_rois,
+)
 from lammps_al.embedding.scripts.surface_mesh import (
     _fallback_normal,
     _normal_from_mesh,
@@ -154,6 +159,32 @@ def test_find_rois_phase_cutoff_without_phase_species_warns_and_ignores():
             atoms, threshold=0.2, cluster_cutoff=1.0, phase_cutoff=2.0
         )
     assert rois == [11, 50]
+
+
+def test_cap_rois_by_uncertainty_none_is_noop():
+    candidates = [(0, 1, 0.5), (2, 3, 0.9), (1, 4, 0.1)]
+    assert cap_rois_by_uncertainty(candidates, None) == candidates
+
+
+def test_cap_rois_by_uncertainty_under_cap_is_noop():
+    candidates = [(0, 1, 0.5), (2, 3, 0.9)]
+    assert cap_rois_by_uncertainty(candidates, 5) == candidates
+
+
+def test_cap_rois_by_uncertainty_keeps_highest_and_resorts_by_frame():
+    # Highest uncertainty overall is (0, 1, 0.9) and (1, 4, 0.7); the
+    # low-uncertainty (2, 3, 0.1) should be dropped, and the two survivors
+    # re-sorted back into (frame, roi_index) order, not uncertainty order.
+    candidates = [(2, 3, 0.1), (0, 1, 0.9), (1, 4, 0.7)]
+    capped = cap_rois_by_uncertainty(candidates, 2)
+    assert capped == [(0, 1, 0.9), (1, 4, 0.7)]
+
+
+def test_cap_rois_by_uncertainty_does_not_mutate_input():
+    candidates = [(2, 3, 0.1), (0, 1, 0.9), (1, 4, 0.7)]
+    original = list(candidates)
+    cap_rois_by_uncertainty(candidates, 2)
+    assert candidates == original
 
 
 def test_carve_box_centers_and_sizes_correctly():

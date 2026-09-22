@@ -152,6 +152,29 @@ def test_roi_extractor_writes_phase_cutoff(
     assert written["phase_cutoff"] == 6.0
 
 
+def test_roi_extractor_writes_max_num_structures(
+    tmp_path, mock_remote_fs, mock_cluster_config, monkeypatch
+):
+    """max_num_structures must reach the extract input JSON so extract.py
+    can cap the number of carved boxes by uncertainty rank."""
+    monkeypatch.setattr(
+        "lammps_al.embedding.extractor.SingleScriptTask", MagicMock()
+    )
+    extractor = ROIExtractor(
+        **_extractor_kwargs(
+            mock_remote_fs,
+            mock_cluster_config,
+            max_num_structures=100,
+            stub=False,
+        )
+    )
+
+    extractor.update(tmp_path, tmp_path / "traj.xyz")
+
+    written = json.loads(extractor.extract_input_file.read_text())
+    assert written["max_num_structures"] == 100
+
+
 def test_roi_extractor_writes_normal_patch_radius(
     tmp_path, mock_remote_fs, mock_cluster_config, monkeypatch
 ):

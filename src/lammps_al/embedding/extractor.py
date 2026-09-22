@@ -109,6 +109,10 @@ class ROIExtractor(Selector):
             after anchoring at the closest surface point. This smooths local
             atomic-scale roughness without mixing in a disconnected nearby
             surface. ``None`` (default) uses ``protect_radius``.
+        max_num_structures: Caps the total number of carved boxes across the
+            whole trajectory, keeping only the highest-uncertainty ROIs --
+            see ``MatrixEmbeddingInput.max_num_structures``. ``None``
+            (default) applies no cap.
         extract_script: Remote payload; defaults to the shipped
             ``scripts/extract.py``
         remote_savepath: Path on the extraction machine for calculation files
@@ -139,6 +143,7 @@ class ROIExtractor(Selector):
         smoothing_level: int = 8,
         mesh_radius: Optional[float] = None,
         normal_patch_radius: Optional[float] = None,
+        max_num_structures: Optional[int] = None,
         extract_script: Optional[os.PathLike] = None,
         remote_savepath: Optional[os.PathLike] = None,
         loop_time: float = 30,
@@ -171,6 +176,7 @@ class ROIExtractor(Selector):
         self.smoothing_level = smoothing_level
         self.mesh_radius = mesh_radius
         self.normal_patch_radius = normal_patch_radius
+        self.max_num_structures = max_num_structures
 
         self.remote_savepath = remote_savepath
         self.loop_time = loop_time
@@ -258,6 +264,7 @@ class ROIExtractor(Selector):
             "smoothing_level": self.smoothing_level,
             "mesh_radius": self.mesh_radius,
             "normal_patch_radius": self.normal_patch_radius,
+            "max_num_structures": self.max_num_structures,
         }
         # Omit rather than write null: remote_handler's ScriptInput.from_dict
         # Path()-converts every _path_fields key present in the JSON
