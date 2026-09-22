@@ -1,9 +1,14 @@
 """Amorphous matrix embedding -- multi-stage LAMMPS anneal entry point.
 
-Entry point for remote execution via ``SingleScriptTask``. Reads a JSON
-input file (path passed as ``sys.argv[1]``), renders a multi-stage LAMMPS
-deck around a frozen ``fixSphere`` centered on the region of interest (ROI),
-runs ``lmp``, and writes the annealed structure.
+Entry point for remote execution via ``SingleScriptTask`` *or*
+``ArrayScriptTask`` (see ``EmbeddingAnnealer``'s ``array_job`` option -- a
+campaign can produce far more ROIs than a one-job-per-box submission can
+reasonably queue). ``SingleScriptTask`` passes the input JSON file itself as
+``sys.argv[1]``; ``ArrayScriptTask`` passes the per-task calcdir instead (the
+input JSON lives inside it as a fixed ``input_anneal.json`` name) -- both are
+accepted here. Renders a multi-stage LAMMPS deck around a frozen
+``fixSphere`` centered on the region of interest (ROI), runs ``lmp``, and
+writes the annealed structure.
 
 Self-contained: does not import from ``lammps_sampling.py`` (whose deck
 rendering/``lmp``-invocation helpers are tied to that script's own MACE
@@ -23,7 +28,13 @@ from ase.data import atomic_numbers
 
 from lammps_al.embedding.inputs import EmbeddingAnnealInput
 
-INPUTFILE = Path(sys.argv[1])
+_ARG = Path(sys.argv[1])
+# ArrayScriptTask's body_array.sh.j2 invokes `python <script> <calcdir>`
+# (one calcdir per array element, no fixed input-file name of its own
+# choosing) -- unlike SingleScriptTask, which passes the input file
+# directly. Accept either: a directory means "look for the fixed
+# input_anneal.json name EmbeddingAnnealer._build_array_task() writes".
+INPUTFILE = _ARG / "input_anneal.json" if _ARG.is_dir() else _ARG
 calcpath = INPUTFILE.parent
 
 input_config = EmbeddingAnnealInput.from_file(INPUTFILE)
@@ -33,6 +44,26 @@ outpath = calcpath / "out"
 # exist_ok so a re-executed/resumed task on a persisted calcdir does not
 # abort before doing any work.
 os.makedirs(outpath, exist_ok=True)
+
+
+def _template_location(calcpath: Path, template_file: str) -> tuple[Path, str]:
+    """Resolve ``template_file`` to a ``(search_dir, bare_name)`` pair.
+
+    A plain filename lives directly in ``calcpath`` (``SingleScriptTask``'s
+    convention: every box's own calcdir gets its own copy of everything). A
+    ``"../name"`` value (``ArrayScriptTask``'s convention: the deck template
+    is identical for every box, so ``EmbeddingAnnealer._build_array_task``
+    uploads it once as a shared resource one directory above each per-box
+    calcdir, instead of duplicating it into all of them) resolves against
+    ``calcpath.parent`` instead. The ``..`` has to be consumed here rather
+    than handed to ``jinja2.Environment.get_template`` -- ``FileSystemLoader``
+    rejects any ``..`` path *component* in a template name outright (a
+    traversal guard), so passing ``"../name"`` straight through would raise
+    ``TemplateNotFound`` even though the file genuinely exists there.
+    """
+    if template_file.startswith("../"):
+        return calcpath.parent, template_file[len("../") :]
+    return calcpath, template_file
 
 
 def _render_deck(
@@ -127,10 +158,13 @@ config_path = outpath / input_config.lammps_config_name
 dump_file = outpath / "anneal.dump"
 final_data_file = outpath / "embedded.data"
 
+_template_dir, _template_name = _template_location(
+    calcpath, input_config.template_file
+)
 _render_deck(
     config_path,
-    calcpath,
-    input_config.template_file,
+    _template_dir,
+    _template_name,
     data_file=calcpath / input_config.data_file,
     pair_style=input_config.pair_style,
     pair_coeff_path=calcpath / input_config.pair_coeff_path,

@@ -40,13 +40,39 @@ import numpy as np
 from ase import Atoms
 from remote_handler.core.cluster_handler import ClusterConfig
 from remote_handler.core.file_handler import FileSystemHandlerBase
-from remote_handler.core.tasks import SingleScriptTask
+from remote_handler.core.tasks import (
+    ArrayScriptTask,
+    DictJSON,
+    SingleScriptTask,
+    Writeable,
+)
 from remote_handler.exceptions import WorkflowError
 from remote_handler.workflows.active_learning_base import Sampler
 
 from lammps_al.embedding.scripts import script_dir
 
 logger = logging.getLogger(__name__)
+
+
+class _CopyFileResource(Writeable):
+    """An ``ArrayScriptTask`` per-box resource that uploads ``content`` (a
+    local file path) verbatim.
+
+    Deliberately *not* ``remote_handler``'s own ``AtomsBatch`` ``Writeable``:
+    ``AtomsBatch.write`` funnels every box through ``FileSystemHandlerBase.
+    write_ase``, which always writes its local staging copy to a hardcoded
+    ``temp_ase_file.extxyz`` (extxyz format) regardless of the *target*
+    filename, then uploads those bytes verbatim -- confirmed directly against
+    the installed ``remote_handler`` (2026-09-22). Handed a box's already-
+    correctly-written ``.data`` (LAMMPS-data format) file, that would silently
+    replace its content with mislabeled extxyz text. This class instead
+    copies the file byte-for-byte via ``remote_fs.put``, the same primitive
+    ``FileAllocator.copy_file`` uses -- no re-serialization, so no format
+    mismatch is possible.
+    """
+
+    def write(self, calcpath):
+        self.remote_fs.put(self.content, Path(calcpath) / self.filename)
 
 
 class EmbeddingAnnealer(Sampler):
@@ -160,6 +186,26 @@ class EmbeddingAnnealer(Sampler):
             ``scripts/embedding_anneal.py``
         remote_savepath: Path on the anneal machine for calculation files
         loop_time: Interval (seconds) to poll for job completion
+        array_job: Submit every box as one SLURM *array* job
+            (``remote_handler.core.tasks.ArrayScriptTask``) instead of one
+            independent ``SingleScriptTask`` per box. The extraction side
+            can legitimately produce hundreds of ROIs in one iteration (a
+            rough, multi-island interface plus an uncalibrated ``threshold``
+            did exactly this on a real campaign, 2026-09-22 -- see
+            ``ROIExtractor.max_num_structures`` for the complementary fix on
+            that side), and queuing that many independent jobs both floods
+            the scheduler and, worse, was previously fully serial here (each
+            ``SingleScriptTask`` submitted and *waited on* in turn before the
+            next was even queued) -- an array job submits once and lets
+            ``num_parallel`` boxes actually run concurrently. Unlike the
+            single-task path (which raises on the first box's failure),
+            array mode tolerates individual box failures: it logs and skips
+            whichever boxes never produced ``out/samples.extxyz``, raising
+            only if *none* of them did -- at this scale, requiring every
+            single LAMMPS run to succeed would make one crashed box discard
+            every other box's already-finished work.
+        num_parallel: Array jobs run concurrently at once (only relevant
+            when ``array_job=True``).
         stub: If True, skip remote execution and produce mock outputs
     """
 
@@ -189,6 +235,8 @@ class EmbeddingAnnealer(Sampler):
         anneal_script: Optional[os.PathLike] = None,
         remote_savepath: Optional[os.PathLike] = None,
         loop_time: float = 30,
+        array_job: bool = False,
+        num_parallel: int = 10,
         stub: bool = False,
     ):
         super().__init__()
@@ -229,6 +277,8 @@ class EmbeddingAnnealer(Sampler):
 
         self.remote_savepath = remote_savepath
         self.loop_time = loop_time
+        self.array_job = array_job
+        self.num_parallel = num_parallel
         self.stub = stub
 
     def update(
@@ -283,35 +333,57 @@ class EmbeddingAnnealer(Sampler):
         if self.stub:
             return
 
+        if self.array_job:
+            self._build_array_task(manifest, extract_out)
+        else:
+            self._build_single_tasks(manifest, extract_out)
+
+    def _anneal_input(self, entry: dict, *, shared_prefix: str = "") -> dict:
+        """The per-box anneal-payload JSON, shared by both submission modes.
+
+        ``shared_prefix`` is ``""`` for a ``SingleScriptTask`` (the template/
+        potential are copied into this box's own calcdir, so a bare filename
+        resolves directly) or ``"../"`` for an array job (they are uploaded
+        once as shared resources one directory above every per-box calcdir --
+        see ``embedding_anneal.py``'s ``_template_location`` for how the
+        remote payload resolves this back).
+        """
+        return {
+            "data_file": Path(entry["data_file"]).name,
+            "lammps_path": Path(self.lammps_path).as_posix(),
+            "template_file": shared_prefix
+            + Path(self.anneal_template_path).name,
+            "cutoff": self.anneal_cutoff,
+            "roi_x": entry["roi_position"][0],
+            "roi_y": entry["roi_position"][1],
+            "roi_z": entry["roi_position"][2],
+            "pair_style": self.pair_style,
+            "pair_coeff_path": shared_prefix + Path(self.pair_coeff_path).name,
+            "species": self.species,
+            "masses": self.masses,
+            "stages": self.anneal_stages,
+            "roi_repel_margin": self.roi_repel_margin,
+            "roi_repel_epsilon": self.roi_repel_epsilon,
+            "roi_repel_wall_cutoff": self.roi_repel_wall_cutoff,
+            "z_wall_margin": self.z_wall_margin,
+            "z_wall_epsilon": self.z_wall_epsilon,
+            "z_wall_cutoff": self.z_wall_cutoff,
+            "timestep": self.timestep,
+            "seed": self.seed,
+            "dump_every": self.dump_every,
+            "lammps_flags": self.lammps_flags,
+        }
+
+    def _build_single_tasks(
+        self, manifest: list[dict], extract_out: Path
+    ) -> None:
+        """One independent ``SingleScriptTask`` per box (the default)."""
         self.anneal_tasks: list[tuple[int, SingleScriptTask]] = []
         for entry in manifest:
             box_dir = self.anneal_dir / f"box_{entry['index']}"
             os.makedirs(box_dir, exist_ok=True)
 
-            anneal_input = {
-                "data_file": Path(entry["data_file"]).name,
-                "lammps_path": Path(self.lammps_path).as_posix(),
-                "template_file": Path(self.anneal_template_path).name,
-                "cutoff": self.anneal_cutoff,
-                "roi_x": entry["roi_position"][0],
-                "roi_y": entry["roi_position"][1],
-                "roi_z": entry["roi_position"][2],
-                "pair_style": self.pair_style,
-                "pair_coeff_path": Path(self.pair_coeff_path).name,
-                "species": self.species,
-                "masses": self.masses,
-                "stages": self.anneal_stages,
-                "roi_repel_margin": self.roi_repel_margin,
-                "roi_repel_epsilon": self.roi_repel_epsilon,
-                "roi_repel_wall_cutoff": self.roi_repel_wall_cutoff,
-                "z_wall_margin": self.z_wall_margin,
-                "z_wall_epsilon": self.z_wall_epsilon,
-                "z_wall_cutoff": self.z_wall_cutoff,
-                "timestep": self.timestep,
-                "seed": self.seed,
-                "dump_every": self.dump_every,
-                "lammps_flags": self.lammps_flags,
-            }
+            anneal_input = self._anneal_input(entry)
             anneal_input_file = box_dir / "input_anneal.json"
             with open(anneal_input_file, "w") as f:
                 f.write(json.dumps(anneal_input, indent=2))
@@ -337,6 +409,63 @@ class EmbeddingAnnealer(Sampler):
             # file -- e.g. a GRACE model is normally saved as a directory.
             task.copy_path(self.pair_coeff_path)
             self.anneal_tasks.append((entry["index"], task))
+
+    def _build_array_task(
+        self, manifest: list[dict], extract_out: Path
+    ) -> None:
+        """One SLURM array job covering every box (``array_job=True``).
+
+        The deck template and potential are genuinely identical across every
+        box, so they're uploaded once as shared resources (``copy_path``,
+        landing in the array's root directory) rather than duplicated into
+        every one of potentially hundreds of per-box calcdirs. Each box still
+        gets its own config JSON + structure file via ``individual_ressources``
+        (``ArrayScriptTask`` writes ``individual_ressources[k][i]`` into
+        ``calcdir/i`` for every resource kind ``k`` and box ``i`` -- the two
+        lists built below must stay index-aligned with ``manifest``, which
+        ``self._array_manifest`` preserves for :meth:`get_sampled_configs` to
+        map results back by the same position).
+        """
+        configs: list[DictJSON] = []
+        structures: list[_CopyFileResource] = []
+        for entry in manifest:
+            anneal_input = self._anneal_input(entry, shared_prefix="../")
+            configs.append(
+                DictJSON(
+                    content=anneal_input,
+                    filename="input_anneal.json",
+                    remote_fs=self.remote_fs,
+                )
+            )
+            structures.append(
+                _CopyFileResource(
+                    content=extract_out / entry["data_file"],
+                    filename=Path(entry["data_file"]).name,
+                    remote_fs=self.remote_fs,
+                )
+            )
+
+        self._array_manifest = manifest
+        self.array_task = ArrayScriptTask(
+            local_savepath=self.anneal_dir / "array",
+            cluster_config=self.cluster_config,
+            remote_fs=self.remote_fs,
+            python_script_file=self.anneal_script,
+            individual_ressources=[configs, structures],
+            remote_savepath=self.remote_savepath,
+            jobfile_name="run_embed_anneal_array.sh",
+            jobname="embed_anneal",
+            logfile="embed_anneal.log",
+            n_processors=1,
+            loop_time=self.loop_time,
+            num_parallel=self.num_parallel,
+            collect_only=False,
+        )
+        self.array_task.allocate_data()
+        self.array_task.copy_path(self.anneal_template_path)
+        # copy_path (not copy_file): potentials aren't always a single file
+        # -- e.g. a GRACE model is normally saved as a directory.
+        self.array_task.copy_path(self.pair_coeff_path)
 
     def _create_stub_outputs(self) -> list[Atoms]:
         """Mock annealed outputs, one per box the extractor reported."""
@@ -375,6 +504,9 @@ class EmbeddingAnnealer(Sampler):
             ase.io.write(output_path, self._create_stub_outputs())
             return output_path
 
+        if self.array_job:
+            return self._get_sampled_configs_array(output_path)
+
         annealed = []
         for index, task in self.anneal_tasks:
             task.submit()
@@ -393,6 +525,63 @@ class EmbeddingAnnealer(Sampler):
             "Embedding anneal produced %d annealed configurations, "
             "written to %s",
             len(annealed),
+            output_path,
+        )
+        return output_path
+
+    def _get_sampled_configs_array(self, output_path: Path) -> Path:
+        """``get_sampled_configs``'s array-job path.
+
+        One blocking call submits and waits for the *whole* array (up to
+        ``num_parallel`` boxes running at once), unlike the single-task path
+        above, which waits on each box in strict sequence before the next is
+        even queued. Tolerant of partial failure: a box missing
+        ``out/samples.extxyz`` (a crashed/non-converged anneal -- not
+        unrealistic across a few hundred independent MD runs) is logged and
+        skipped rather than discarding every other box's already-finished
+        work; this only raises if *none* of them produced output.
+        """
+        self.array_task.submit()
+        self.array_task.collect_results()
+
+        annealed = []
+        failed = []
+        for i, entry in enumerate(self._array_manifest):
+            box_out = (
+                Path(self.array_task.local_savepath)
+                / str(i)
+                / "out"
+                / "samples.extxyz"
+            )
+            if not box_out.exists():
+                failed.append(entry["index"])
+                continue
+            annealed.append(ase.io.read(box_out))
+
+        if failed:
+            logger.warning(
+                "Embedding anneal (array job): %d/%d box(es) produced no "
+                "output (no out/samples.extxyz) and were skipped -- box "
+                "indices: %s. Check job logs under %s/<array index>/.",
+                len(failed),
+                len(self._array_manifest),
+                failed,
+                self.array_task.local_savepath,
+            )
+        if not annealed:
+            raise WorkflowError(
+                "Embedding anneal (array job): none of the "
+                f"{len(self._array_manifest)} box(es) produced output "
+                f"(no out/samples.extxyz). Check job logs under "
+                f"{self.array_task.local_savepath}/<array index>/."
+            )
+
+        ase.io.write(output_path, annealed)
+        logger.info(
+            "Embedding anneal (array job) produced %d/%d annealed "
+            "configurations, written to %s",
+            len(annealed),
+            len(self._array_manifest),
             output_path,
         )
         return output_path

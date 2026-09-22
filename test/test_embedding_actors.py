@@ -13,6 +13,7 @@ import pytest
 
 pytest.importorskip("remote_handler")
 import ase.io  # noqa: E402
+from ase import Atoms  # noqa: E402
 from remote_handler.core.cluster_handler import ClusterConfig  # noqa: E402
 from remote_handler.exceptions import WorkflowError  # noqa: E402
 
@@ -243,6 +244,156 @@ def test_embedding_annealer_stub_mode(
     assert len(configs) == 2
     for atoms in configs:
         assert atoms.info["topology_mode"] == "bulk"
+
+
+def test_embedding_annealer_array_job_builds_index_aligned_resources(
+    tmp_path, mock_remote_fs, mock_cluster_config, monkeypatch
+):
+    """array_job=True must build one config + one structure Writeable per
+    box, index-aligned with the manifest (ArrayScriptTask writes
+    individual_ressources[k][i] into calcdir/i for every resource kind k),
+    upload the template/potential once as shared resources, and never touch
+    SingleScriptTask."""
+    array_task_cls = MagicMock()
+    single_task_cls = MagicMock()
+    monkeypatch.setattr(
+        "lammps_al.embedding.annealer.ArrayScriptTask", array_task_cls
+    )
+    monkeypatch.setattr(
+        "lammps_al.embedding.annealer.SingleScriptTask", single_task_cls
+    )
+
+    annealer = EmbeddingAnnealer(
+        **_annealer_kwargs(
+            mock_remote_fs, mock_cluster_config, array_job=True, stub=False
+        )
+    )
+    extract_out = tmp_path / "extract_out"
+    extract_out.mkdir()
+    manifest = [
+        {
+            "index": i,
+            "roi_position": [1.0, 1.0, 1.0],
+            "data_file": f"box_{i}.data",
+        }
+        for i in range(3)
+    ]
+    (extract_out / "manifest.json").write_text(json.dumps(manifest))
+    for entry in manifest:
+        (extract_out / entry["data_file"]).write_text("fake lammps-data")
+
+    annealer.update(tmp_path, extract_out)
+
+    single_task_cls.assert_not_called()
+    array_task_cls.assert_called_once()
+    _, kwargs = array_task_cls.call_args
+    configs, structures = kwargs["individual_ressources"]
+    assert [c.content["data_file"] for c in configs] == [
+        "box_0.data",
+        "box_1.data",
+        "box_2.data",
+    ]
+    assert all(c.content["template_file"].startswith("../") for c in configs)
+    assert all(c.content["pair_coeff_path"].startswith("../") for c in configs)
+    assert [s.filename for s in structures] == [
+        "box_0.data",
+        "box_1.data",
+        "box_2.data",
+    ]
+    assert [s.content for s in structures] == [
+        extract_out / e["data_file"] for e in manifest
+    ]
+
+    array_task = array_task_cls.return_value
+    array_task.allocate_data.assert_called_once()
+    array_task.copy_path.assert_any_call(annealer.anneal_template_path)
+    array_task.copy_path.assert_any_call(annealer.pair_coeff_path)
+
+
+def test_embedding_annealer_array_job_get_sampled_configs_combines_boxes(
+    tmp_path, mock_remote_fs, mock_cluster_config
+):
+    """get_sampled_configs()'s array-job path must read each box's own
+    out/samples.extxyz (by manifest position) and combine them."""
+    annealer = EmbeddingAnnealer(
+        **_annealer_kwargs(
+            mock_remote_fs, mock_cluster_config, array_job=True, stub=False
+        )
+    )
+    annealer.anneal_dir = tmp_path / "anneal"
+    annealer.anneal_dir.mkdir()
+    annealer._array_manifest = [{"index": 0}, {"index": 1}, {"index": 2}]
+
+    array_root = tmp_path / "array_local"
+    for i, symbol in enumerate(["Cu", "H", "O"]):
+        box_out = array_root / str(i) / "out"
+        box_out.mkdir(parents=True)
+        atoms = Atoms(
+            symbol, positions=[[0, 0, 0]], cell=[10, 10, 10], pbc=True
+        )
+        ase.io.write(box_out / "samples.extxyz", atoms)
+
+    annealer.array_task = MagicMock()
+    annealer.array_task.local_savepath = array_root
+
+    output_path = annealer.get_sampled_configs()
+
+    configs = ase.io.read(output_path, index=":")
+    assert len(configs) == 3
+    annealer.array_task.submit.assert_called_once()
+    annealer.array_task.collect_results.assert_called_once()
+
+
+def test_embedding_annealer_array_job_tolerates_partial_failure(
+    tmp_path, mock_remote_fs, mock_cluster_config
+):
+    """A box with no out/samples.extxyz (crashed anneal) is skipped, not
+    fatal, as long as at least one other box succeeded."""
+    annealer = EmbeddingAnnealer(
+        **_annealer_kwargs(
+            mock_remote_fs, mock_cluster_config, array_job=True, stub=False
+        )
+    )
+    annealer.anneal_dir = tmp_path / "anneal"
+    annealer.anneal_dir.mkdir()
+    annealer._array_manifest = [{"index": 0}, {"index": 1}]
+
+    array_root = tmp_path / "array_local"
+    box_out = array_root / "0" / "out"
+    box_out.mkdir(parents=True)
+    atoms = Atoms("Cu", positions=[[0, 0, 0]], cell=[10, 10, 10], pbc=True)
+    ase.io.write(box_out / "samples.extxyz", atoms)
+    # box 1: no output at all -- simulates a crashed/non-converged anneal.
+    (array_root / "1" / "out").mkdir(parents=True)
+
+    annealer.array_task = MagicMock()
+    annealer.array_task.local_savepath = array_root
+
+    output_path = annealer.get_sampled_configs()
+    configs = ase.io.read(output_path, index=":")
+    assert len(configs) == 1
+
+
+def test_embedding_annealer_array_job_raises_if_all_boxes_fail(
+    tmp_path, mock_remote_fs, mock_cluster_config
+):
+    annealer = EmbeddingAnnealer(
+        **_annealer_kwargs(
+            mock_remote_fs, mock_cluster_config, array_job=True, stub=False
+        )
+    )
+    annealer.anneal_dir = tmp_path / "anneal"
+    annealer.anneal_dir.mkdir()
+    annealer._array_manifest = [{"index": 0}]
+
+    array_root = tmp_path / "array_local"
+    (array_root / "0" / "out").mkdir(parents=True)
+
+    annealer.array_task = MagicMock()
+    annealer.array_task.local_savepath = array_root
+
+    with pytest.raises(WorkflowError, match="none of the"):
+        annealer.get_sampled_configs()
 
 
 @pytest.mark.parametrize(
