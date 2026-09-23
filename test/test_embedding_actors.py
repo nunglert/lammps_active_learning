@@ -373,7 +373,7 @@ def test_embedding_annealer_array_job_get_sampled_configs_combines_boxes(
 
     array_root = tmp_path / "array_local"
     for i, symbol in enumerate(["Cu", "H", "O"]):
-        box_out = array_root / str(i) / "out"
+        box_out = array_root / "calcdirs" / str(i) / "out"
         box_out.mkdir(parents=True)
         atoms = Atoms(
             symbol, positions=[[0, 0, 0]], cell=[10, 10, 10], pbc=True
@@ -406,12 +406,12 @@ def test_embedding_annealer_array_job_tolerates_partial_failure(
     annealer._array_manifest = [{"index": 0}, {"index": 1}]
 
     array_root = tmp_path / "array_local"
-    box_out = array_root / "0" / "out"
+    box_out = array_root / "calcdirs" / "0" / "out"
     box_out.mkdir(parents=True)
     atoms = Atoms("Cu", positions=[[0, 0, 0]], cell=[10, 10, 10], pbc=True)
     ase.io.write(box_out / "samples.extxyz", atoms)
     # box 1: no output at all -- simulates a crashed/non-converged anneal.
-    (array_root / "1" / "out").mkdir(parents=True)
+    (array_root / "calcdirs" / "1" / "out").mkdir(parents=True)
 
     annealer.array_task = MagicMock()
     annealer.array_task.local_savepath = array_root
@@ -434,7 +434,7 @@ def test_embedding_annealer_array_job_raises_if_all_boxes_fail(
     annealer._array_manifest = [{"index": 0}]
 
     array_root = tmp_path / "array_local"
-    (array_root / "0" / "out").mkdir(parents=True)
+    (array_root / "calcdirs" / "0" / "out").mkdir(parents=True)
 
     annealer.array_task = MagicMock()
     annealer.array_task.local_savepath = array_root

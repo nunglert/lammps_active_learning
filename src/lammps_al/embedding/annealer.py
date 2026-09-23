@@ -40,6 +40,7 @@ import numpy as np
 from ase import Atoms
 from remote_handler.core.cluster_handler import ClusterConfig
 from remote_handler.core.file_handler import FileSystemHandlerBase
+from remote_handler.core.remote_env import CALCDIRS_DIRNAME
 from remote_handler.core.tasks import (
     ArrayScriptTask,
     DictJSON,
@@ -567,6 +568,7 @@ class EmbeddingAnnealer(Sampler):
         for i, entry in enumerate(self._array_manifest):
             box_out = (
                 Path(self.array_task.local_savepath)
+                / CALCDIRS_DIRNAME
                 / str(i)
                 / "out"
                 / "samples.extxyz"
@@ -580,18 +582,20 @@ class EmbeddingAnnealer(Sampler):
             logger.warning(
                 "Embedding anneal (array job): %d/%d box(es) produced no "
                 "output (no out/samples.extxyz) and were skipped -- box "
-                "indices: %s. Check job logs under %s/<array index>/.",
+                "indices: %s. Check job logs under %s/%s/<array index>/.",
                 len(failed),
                 len(self._array_manifest),
                 failed,
                 self.array_task.local_savepath,
+                CALCDIRS_DIRNAME,
             )
         if not annealed:
             raise WorkflowError(
                 "Embedding anneal (array job): none of the "
                 f"{len(self._array_manifest)} box(es) produced output "
                 f"(no out/samples.extxyz). Check job logs under "
-                f"{self.array_task.local_savepath}/<array index>/."
+                f"{self.array_task.local_savepath}/{CALCDIRS_DIRNAME}"
+                "/<array index>/."
             )
 
         ase.io.write(output_path, annealed)
