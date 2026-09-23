@@ -43,6 +43,7 @@ from remote_handler.core.file_handler import FileSystemHandlerBase
 from remote_handler.core.remote_env import CALCDIRS_DIRNAME
 from remote_handler.core.tasks import (
     ArrayScriptTask,
+    DetachableTaskMixin,
     DictJSON,
     SingleScriptTask,
     Writeable,
@@ -76,7 +77,7 @@ class _CopyFileResource(Writeable):
         self.remote_fs.put(self.content, Path(calcpath) / self.filename)
 
 
-class EmbeddingAnnealer(Sampler):
+class EmbeddingAnnealer(DetachableTaskMixin, Sampler):
     """
     Anneals every carved box produced by
     :class:`lammps_al.embedding.extractor.ROIExtractor` with a multi-stage
@@ -217,7 +218,27 @@ class EmbeddingAnnealer(Sampler):
         num_parallel: Array jobs run concurrently at once (only relevant
             when ``array_job=True``).
         stub: If True, skip remote execution and produce mock outputs
+        collect_only: If True (``array_job=True`` only), ``update``
+            reconstructs the array job an earlier, ``collect_only=False``
+            call already submitted (from its manifest) instead of building
+            and resubmitting a new one -- see ``DetachableTaskMixin``.
+            Normally left False and driven instead by
+            ``StagedActiveLearningHandler``'s own automatic reattach: it
+            detects a pending manifest via ``pending_manifest()`` and flips
+            this on for one call on its own, so a driver restart resumes an
+            already-submitted array job rather than resubmitting from
+            scratch. Not supported for the per-box ``array_job=False`` path
+            (one task per box, no single manifest to reattach to).
+        reattach_max_wait: Only used when ``collect_only``: how long (in
+            seconds) to wait for the reattached array job to finish before
+            giving up. ``None`` (default) waits forever.
     """
+
+    _iteration_subdir = "anneal"  # calcdir/anneal -- see DetachableTaskMixin
+    # Matches this actor's pre-existing on-disk layout for the array job
+    # (calcdir/anneal/array, not the mixin's own "results" default) --
+    # keeps a manifest already written under the old layout still findable.
+    _results_subdir = "array"
 
     def __init__(
         self,
@@ -249,6 +270,8 @@ class EmbeddingAnnealer(Sampler):
         array_job: bool = False,
         num_parallel: int = 10,
         stub: bool = False,
+        collect_only: bool = False,
+        reattach_max_wait: Optional[float] = None,
     ):
         super().__init__()
         if anneal_script is None:
@@ -292,6 +315,22 @@ class EmbeddingAnnealer(Sampler):
         self.array_job = array_job
         self.num_parallel = num_parallel
         self.stub = stub
+        self.collect_only = collect_only
+        self.reattach_max_wait = reattach_max_wait
+
+    def pending_manifest(self, calcdir: os.PathLike) -> Optional[Path]:
+        """Reattach is only supported for the array-job path.
+
+        The per-box ``array_job=False`` path builds one independent
+        ``SingleScriptTask`` per box rather than a single task/manifest, so
+        there is nothing here for ``DetachableTaskMixin``'s default
+        (manifest-path-based) implementation to reattach to -- return
+        ``None`` (reattach unsupported) in that case, same as the ABC's own
+        default.
+        """
+        if not self.array_job:
+            return None
+        return super().pending_manifest(calcdir)
 
     def update(
         self,
@@ -338,7 +377,7 @@ class EmbeddingAnnealer(Sampler):
         )
         manifest = json.loads((extract_out / "manifest.json").read_text())
 
-        self.anneal_dir = Path(calcdir) / "anneal"
+        self.anneal_dir = self.iteration_dir(calcdir)
         os.makedirs(self.anneal_dir, exist_ok=True)
         self._num_boxes = len(manifest)
 
@@ -346,7 +385,7 @@ class EmbeddingAnnealer(Sampler):
             return
 
         if self.array_job:
-            self._build_array_task(manifest, extract_out)
+            self._build_array_task(calcdir, manifest, extract_out)
         else:
             self._build_single_tasks(manifest, extract_out)
 
@@ -430,7 +469,7 @@ class EmbeddingAnnealer(Sampler):
             self.anneal_tasks.append((entry["index"], task))
 
     def _build_array_task(
-        self, manifest: list[dict], extract_out: Path
+        self, calcdir: Path, manifest: list[dict], extract_out: Path
     ) -> None:
         """One SLURM array job covering every box (``array_job=True``).
 
@@ -444,47 +483,67 @@ class EmbeddingAnnealer(Sampler):
         lists built below must stay index-aligned with ``manifest``, which
         ``self._array_manifest`` preserves for :meth:`get_sampled_configs` to
         map results back by the same position).
+
+        Goes through ``DetachableTaskMixin.build_or_resume_array_task``
+        rather than constructing+allocating ``ArrayScriptTask`` directly, so
+        a ``collect_only`` call (driven by ``StagedActiveLearningHandler``'s
+        automatic reattach, via :meth:`pending_manifest`) reconstructs the
+        already-submitted job from its manifest instead of resubmitting --
+        this is what makes a driver restart pick up an anneal array job
+        that's already running/finished rather than launching a duplicate.
+        The shared-resource upload (template + potential) only makes sense
+        for a freshly built job, so it's skipped entirely when reattaching.
         """
-        configs: list[DictJSON] = []
-        structures: list[_CopyFileResource] = []
-        for entry in manifest:
-            anneal_input = self._anneal_input(entry, shared_prefix="../../")
-            configs.append(
-                DictJSON(
-                    content=anneal_input,
-                    filename="input_anneal.json",
-                    remote_fs=self.remote_fs,
+        self._array_manifest = manifest
+        self.results_dir = self.results_dir_for(calcdir)
+
+        def _build_task() -> ArrayScriptTask:
+            configs: list[DictJSON] = []
+            structures: list[_CopyFileResource] = []
+            for entry in manifest:
+                anneal_input = self._anneal_input(
+                    entry, shared_prefix="../../"
                 )
-            )
-            structures.append(
-                _CopyFileResource(
-                    content=extract_out / entry["data_file"],
-                    filename=Path(entry["data_file"]).name,
-                    remote_fs=self.remote_fs,
+                configs.append(
+                    DictJSON(
+                        content=anneal_input,
+                        filename="input_anneal.json",
+                        remote_fs=self.remote_fs,
+                    )
                 )
+                structures.append(
+                    _CopyFileResource(
+                        content=extract_out / entry["data_file"],
+                        filename=Path(entry["data_file"]).name,
+                        remote_fs=self.remote_fs,
+                    )
+                )
+            return ArrayScriptTask(
+                local_savepath=self.results_dir,
+                cluster_config=self.cluster_config,
+                remote_fs=self.remote_fs,
+                python_script_file=self.anneal_script,
+                individual_ressources=[configs, structures],
+                remote_savepath=self.remote_savepath,
+                jobfile_name="run_embed_anneal_array.sh",
+                jobname="embed_anneal",
+                logfile="embed_anneal.log",
+                n_processors=self.n_processors,
+                loop_time=self.loop_time,
+                num_parallel=self.num_parallel,
+                collect_only=False,
             )
 
-        self._array_manifest = manifest
-        self.array_task = ArrayScriptTask(
-            local_savepath=self.anneal_dir / "array",
-            cluster_config=self.cluster_config,
-            remote_fs=self.remote_fs,
+        self.array_task = self.build_or_resume_array_task(
+            self.results_dir,
+            _build_task,
             python_script_file=self.anneal_script,
-            individual_ressources=[configs, structures],
-            remote_savepath=self.remote_savepath,
-            jobfile_name="run_embed_anneal_array.sh",
-            jobname="embed_anneal",
-            logfile="embed_anneal.log",
-            n_processors=self.n_processors,
-            loop_time=self.loop_time,
-            num_parallel=self.num_parallel,
-            collect_only=False,
         )
-        self.array_task.allocate_data()
-        self.array_task.copy_path(self.anneal_template_path)
-        # copy_path (not copy_file): potentials aren't always a single file
-        # -- e.g. a GRACE model is normally saved as a directory.
-        self.array_task.copy_path(self.pair_coeff_path)
+        if not self.collect_only:
+            # copy_path (not copy_file): potentials aren't always a single
+            # file -- e.g. a GRACE model is normally saved as a directory.
+            self.array_task.copy_path(self.anneal_template_path)
+            self.array_task.copy_path(self.pair_coeff_path)
 
     def _create_stub_outputs(self) -> list[Atoms]:
         """Mock annealed outputs, one per box the extractor reported."""
@@ -559,8 +618,27 @@ class EmbeddingAnnealer(Sampler):
         unrealistic across a few hundred independent MD runs) is logged and
         skipped rather than discarding every other box's already-finished
         work; this only raises if *none* of them produced output.
+
+        When ``collect_only`` (a reattached array -- see
+        :meth:`_build_array_task`), there is no fresh ``submit()`` call to
+        block on, so this polls ``wait_if_needed`` instead (bounded by
+        ``reattach_max_wait``) until every box's own ``is_finished.info``
+        marker appears remotely -- the same strict, whole-array wait
+        ``remote_handler``'s other array-job actors (e.g. ``ModelTrainer``)
+        use for reattach, even though, like here, their own downstream
+        collection step already tolerates individual box failures.
         """
-        self.array_task.submit()
+        if self.collect_only:
+            self.wait_if_needed(
+                self.array_task,
+                max_wait=self.reattach_max_wait,
+                error_message=(
+                    "Reattached embedding anneal (array job) did not "
+                    "finish."
+                ),
+            )
+        else:
+            self.array_task.submit()
         self.array_task.collect_results()
 
         annealed = []

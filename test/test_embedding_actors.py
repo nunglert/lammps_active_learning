@@ -15,6 +15,7 @@ pytest.importorskip("remote_handler")
 import ase.io  # noqa: E402
 from ase import Atoms  # noqa: E402
 from remote_handler.core.cluster_handler import ClusterConfig  # noqa: E402
+from remote_handler.core.tasks import ArrayScriptTask  # noqa: E402
 from remote_handler.exceptions import WorkflowError  # noqa: E402
 
 from lammps_al.embedding.annealer import EmbeddingAnnealer  # noqa: E402
@@ -441,6 +442,104 @@ def test_embedding_annealer_array_job_raises_if_all_boxes_fail(
 
     with pytest.raises(WorkflowError, match="none of the"):
         annealer.get_sampled_configs()
+
+
+def test_embedding_annealer_array_job_pending_manifest_only_when_array(
+    tmp_path, mock_remote_fs, mock_cluster_config
+):
+    """Reattach must be offered only for array_job=True -- the per-box path
+    has no single manifest to reattach to."""
+    array_annealer = EmbeddingAnnealer(
+        **_annealer_kwargs(
+            mock_remote_fs, mock_cluster_config, array_job=True, stub=False
+        )
+    )
+    assert array_annealer.pending_manifest(tmp_path) == (
+        tmp_path / "anneal" / "array.manifest.json"
+    )
+
+    single_annealer = EmbeddingAnnealer(
+        **_annealer_kwargs(
+            mock_remote_fs, mock_cluster_config, array_job=False, stub=False
+        )
+    )
+    assert single_annealer.pending_manifest(tmp_path) is None
+
+
+def test_embedding_annealer_array_job_collect_only_reattaches_without_resubmitting(
+    tmp_path, mock_remote_fs, mock_cluster_config, monkeypatch
+):
+    """A restarted driver must pick up an already-submitted/finished array
+    job instead of resubmitting a duplicate.
+
+    This is the ``collect_only=True`` shape StagedActiveLearningHandler's
+    own automatic reattach drives (it detects a pending manifest via
+    pending_manifest() and flips collect_only on for one call) -- exercised
+    here directly on the annealer, bypassing the handler. Must reconstruct
+    the task from its manifest (never build a fresh ArrayScriptTask, never
+    allocate_data, never re-upload the template/potential, never resubmit),
+    while still collecting results exactly as a freshly-submitted job's
+    would be collected.
+    """
+    array_task_cls = MagicMock()
+    monkeypatch.setattr(
+        "lammps_al.embedding.annealer.ArrayScriptTask", array_task_cls
+    )
+    reattached_task = MagicMock()
+    reattached_task.finish_check.return_value = True
+    monkeypatch.setattr(
+        ArrayScriptTask,
+        "from_manifest",
+        MagicMock(return_value=reattached_task),
+    )
+
+    array_root = tmp_path / "array_local"
+    for i, symbol in enumerate(["Cu", "H"]):
+        box_out = array_root / "calcdirs" / str(i) / "out"
+        box_out.mkdir(parents=True)
+        atoms = Atoms(
+            symbol, positions=[[0, 0, 0]], cell=[10, 10, 10], pbc=True
+        )
+        ase.io.write(box_out / "samples.extxyz", atoms)
+    reattached_task.local_savepath = array_root
+
+    annealer = EmbeddingAnnealer(
+        **_annealer_kwargs(
+            mock_remote_fs,
+            mock_cluster_config,
+            array_job=True,
+            stub=False,
+            collect_only=True,
+        )
+    )
+    extract_out = tmp_path / "extract_out"
+    extract_out.mkdir()
+    manifest = [
+        {
+            "index": i,
+            "roi_position": [1.0, 1.0, 1.0],
+            "data_file": f"box_{i}.data",
+        }
+        for i in range(2)
+    ]
+    (extract_out / "manifest.json").write_text(json.dumps(manifest))
+    for entry in manifest:
+        (extract_out / entry["data_file"]).write_text("fake lammps-data")
+
+    annealer.update(tmp_path, extract_out)
+
+    array_task_cls.assert_not_called()  # no fresh ArrayScriptTask built
+    ArrayScriptTask.from_manifest.assert_called_once()
+    assert annealer.array_task is reattached_task
+    reattached_task.allocate_data.assert_not_called()
+    reattached_task.copy_path.assert_not_called()
+
+    output_path = annealer.get_sampled_configs()
+
+    reattached_task.submit.assert_not_called()
+    reattached_task.collect_results.assert_called_once()
+    configs = ase.io.read(output_path, index=":")
+    assert len(configs) == 2
 
 
 @pytest.mark.parametrize(
