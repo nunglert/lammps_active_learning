@@ -289,6 +289,11 @@ class EmbeddingAnnealInput(ScriptInput):
             hard-coded; e.g. ``"-k on g 1 -sf kk -pk kokkos newton on neigh
             half"`` for a single-GPU Kokkos build. Empty runs a plain,
             unaccelerated ``lmp``.
+        n_processors: MPI ranks to run ``lmp`` under (``mpirun -np N``).
+            ``1`` (default) runs ``lmp`` directly, unchanged from a bare
+            invocation. Only effective if the ``lmp`` binary itself was
+            built with MPI enabled -- LAMMPS silently runs single-rank
+            under a non-MPI build regardless of this value.
         lammps_config_name: Name for the rendered LAMMPS input file.
         roi_repel_margin: Gap (Angstrom) subtracted from ``cutoff`` to place
             a harmonic repulsive wall (``region ... side out`` + ``fix
@@ -362,6 +367,7 @@ class EmbeddingAnnealInput(ScriptInput):
     seed: int = 42
     dump_every: int = 1000
     lammps_flags: str = ""
+    n_processors: int = 1
     lammps_config_name: str = "lammps.in"
     roi_repel_margin: float = 0.5
     roi_repel_epsilon: float = 10.0
@@ -378,6 +384,9 @@ class EmbeddingAnnealInput(ScriptInput):
         """
         if self.cutoff <= 0:
             raise ScriptInputError("cutoff must be positive")
+
+        if self.n_processors <= 0:
+            raise ScriptInputError("n_processors must be positive")
 
         if not self.species:
             raise ScriptInputError("species cannot be empty")

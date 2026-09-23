@@ -182,6 +182,15 @@ class EmbeddingAnnealer(Sampler):
         lammps_flags: Extra ``lmp`` command-line flags (e.g. Kokkos/GPU
             acceleration) passed verbatim to the anneal; depends on the
             LAMMPS build and force field, empty runs a plain ``lmp``
+        n_processors: MPI ranks per box (``mpirun -np N``), and the number
+            of cores requested from the scheduler for each box. Only
+            effective if ``lammps_path`` points at an MPI-enabled build --
+            a non-MPI ``lmp`` silently runs single-rank regardless of this
+            value. Each box here is typically a few hundred atoms, well
+            below where LAMMPS' spatial decomposition scales well, so a
+            small value (2-4) is more likely to help than a large one; this
+            also trades directly against ``array_job``'s ``num_parallel``
+            for the same core budget (N boxes * n_processors cores each).
         anneal_script: Remote payload; defaults to the shipped
             ``scripts/embedding_anneal.py``
         remote_savepath: Path on the anneal machine for calculation files
@@ -232,6 +241,7 @@ class EmbeddingAnnealer(Sampler):
         seed: int = 42,
         dump_every: int = 1000,
         lammps_flags: str = "",
+        n_processors: int = 1,
         anneal_script: Optional[os.PathLike] = None,
         remote_savepath: Optional[os.PathLike] = None,
         loop_time: float = 30,
@@ -274,6 +284,7 @@ class EmbeddingAnnealer(Sampler):
         self.seed = seed
         self.dump_every = dump_every
         self.lammps_flags = lammps_flags
+        self.n_processors = n_processors
 
         self.remote_savepath = remote_savepath
         self.loop_time = loop_time
@@ -378,6 +389,7 @@ class EmbeddingAnnealer(Sampler):
             "seed": self.seed,
             "dump_every": self.dump_every,
             "lammps_flags": self.lammps_flags,
+            "n_processors": self.n_processors,
         }
 
     def _build_single_tasks(
@@ -404,7 +416,7 @@ class EmbeddingAnnealer(Sampler):
                 jobfile_name="run_embed_anneal.sh",
                 jobname=f"embed_anneal_{entry['index']}",
                 logfile="embed_anneal.log",
-                n_processors=1,
+                n_processors=self.n_processors,
                 loop_time=self.loop_time,
                 collect_only=False,
             )
@@ -462,7 +474,7 @@ class EmbeddingAnnealer(Sampler):
             jobfile_name="run_embed_anneal_array.sh",
             jobname="embed_anneal",
             logfile="embed_anneal.log",
-            n_processors=1,
+            n_processors=self.n_processors,
             loop_time=self.loop_time,
             num_parallel=self.num_parallel,
             collect_only=False,

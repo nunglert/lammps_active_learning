@@ -224,6 +224,28 @@ def test_embedding_anneal_input_bulk_defaults_valid(tmp_path):
     cfg.validate()
 
 
+def test_embedding_anneal_input_n_processors_must_be_positive(tmp_path):
+    lmp = tmp_path / "lmp"
+    lmp.write_text("#!/bin/sh\n")
+    cfg = EmbeddingAnnealInput(
+        data_file="embedded_0.data",
+        lammps_path=lmp,
+        template_file="embedding_anneal.in.j2",
+        cutoff=4.0,
+        roi_x=1.0,
+        roi_y=1.0,
+        roi_z=1.0,
+        pair_style="grace",
+        pair_coeff_path="model",
+        species=["Cu", "H", "O"],
+        masses=[63.5, 1.0, 16.0],
+        n_processors=0,
+        **_one_stage_kwargs(),
+    )
+    with pytest.raises(ScriptInputError, match="n_processors"):
+        cfg.validate()
+
+
 def test_embedding_anneal_input_arbitrary_segment_count_valid(tmp_path):
     """A stage isn't limited to a 2-segment start/mid/end ramp -- any
     number of temperature waypoints (and therefore segments) works."""

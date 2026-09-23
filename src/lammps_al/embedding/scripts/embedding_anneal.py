@@ -90,6 +90,7 @@ def _run_lammps(
     input_file: Path,
     logger: logging.Logger,
     extra_flags: str = "",
+    n_processors: int = 1,
 ) -> None:
     """Invoke ``lmp`` on a rendered deck.
 
@@ -97,11 +98,19 @@ def _run_lammps(
     between ``-in`` and ``-log``. The right flags depend on the LAMMPS build
     and the force field in use, so they are configured by the caller rather
     than hard-coded here (empty -> a plain, unaccelerated ``lmp`` run).
+
+    ``n_processors`` > 1 launches ``lmp`` under ``mpirun -np N`` instead of
+    running it directly -- a no-op unless the ``lmp`` binary itself was
+    actually built with MPI enabled (LAMMPS silently runs single-rank
+    otherwise). Left at 1 (the default), the command is unchanged from a
+    bare, non-MPI invocation.
     """
     command = f"{lmp_cmd} -in {input_file.resolve()}"
     if extra_flags:
         command += f" {extra_flags}"
     command += f" -log {log_file.resolve()}"
+    if n_processors > 1:
+        command = f"mpirun -np {n_processors} {command}"
     try:
         subprocess.run(
             command,
@@ -205,6 +214,7 @@ _run_lammps(
     input_file=config_path,
     logger=logging.getLogger(),
     extra_flags=input_config.lammps_flags,
+    n_processors=input_config.n_processors,
 )
 
 # lammps-data has no element symbols, only type numbers -- Z_of_type maps

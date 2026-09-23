@@ -221,6 +221,38 @@ def test_roi_extractor_molecule_requires_valid_solvent_type(
 # ---------------------------------------------------------------------------
 
 
+def test_embedding_annealer_single_task_passes_n_processors(
+    tmp_path, mock_remote_fs, mock_cluster_config, monkeypatch
+):
+    """n_processors must reach both the SLURM resource request (SingleScriptTask)
+    and the anneal input JSON (embedding_anneal.py's mpirun -np N wrapping)."""
+    single_task_cls = MagicMock()
+    monkeypatch.setattr(
+        "lammps_al.embedding.annealer.SingleScriptTask", single_task_cls
+    )
+    annealer = EmbeddingAnnealer(
+        **_annealer_kwargs(
+            mock_remote_fs, mock_cluster_config, n_processors=4, stub=False
+        )
+    )
+    extract_out = tmp_path / "extract_out"
+    extract_out.mkdir()
+    manifest = [
+        {"index": 0, "roi_position": [1.0, 1.0, 1.0], "data_file": "x.data"}
+    ]
+    (extract_out / "manifest.json").write_text(json.dumps(manifest))
+    (extract_out / "x.data").write_text("fake lammps-data")
+
+    annealer.update(tmp_path, extract_out)
+
+    _, kwargs = single_task_cls.call_args
+    assert kwargs["n_processors"] == 4
+    written = json.loads(
+        (tmp_path / "anneal" / "box_0" / "input_anneal.json").read_text()
+    )
+    assert written["n_processors"] == 4
+
+
 def test_embedding_annealer_stub_mode(
     tmp_path, mock_remote_fs, mock_cluster_config
 ):
@@ -265,7 +297,11 @@ def test_embedding_annealer_array_job_builds_index_aligned_resources(
 
     annealer = EmbeddingAnnealer(
         **_annealer_kwargs(
-            mock_remote_fs, mock_cluster_config, array_job=True, stub=False
+            mock_remote_fs,
+            mock_cluster_config,
+            array_job=True,
+            n_processors=2,
+            stub=False,
         )
     )
     extract_out = tmp_path / "extract_out"
@@ -287,12 +323,14 @@ def test_embedding_annealer_array_job_builds_index_aligned_resources(
     single_task_cls.assert_not_called()
     array_task_cls.assert_called_once()
     _, kwargs = array_task_cls.call_args
+    assert kwargs["n_processors"] == 2
     configs, structures = kwargs["individual_ressources"]
     assert [c.content["data_file"] for c in configs] == [
         "box_0.data",
         "box_1.data",
         "box_2.data",
     ]
+    assert all(c.content["n_processors"] == 2 for c in configs)
     # Exact prefix, not just startswith("../"): ArrayScriptTask places each
     # box's calcdir at rootpath/calcdirs/<i> (remote_handler.core.remote_env.
     # CALCDIRS_DIRNAME) -- two directories below where copy_path uploads
