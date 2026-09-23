@@ -284,10 +284,10 @@ class PeakUncertaintySelector(ConfigSelector):
     by :class:`CommitteeUncertaintySelector`'s remote payload). Wrap in
     ``remote_handler.workflows.SelectorActor`` to use as a ``Stage``, e.g.
     for a campaign (like ``examples/mace_md_AL``) that hands whole configs
-    straight to an evaluator with no further spatial selection step (unlike
-    ``rough_cu_water_al``, whose ``ROIExtractor`` does its own spatial
-    selection over the full annotated trajectory and needs no peak
-    reduction first).
+    straight to an evaluator with no further spatial selection step -- unlike
+    an amorphous-matrix embedding pipeline, where ``ROIExtractor`` does its
+    own spatial selection over the full annotated trajectory and needs no
+    peak reduction first.
 
     Args:
         bin_count: Number of trajectory segments to pick a peak-uncertainty

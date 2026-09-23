@@ -63,12 +63,11 @@ def find_rois(
             keeps an interface-oriented extraction (carved boxes need a
             condensed-phase core for ``EmbeddingAnnealer``'s frozen-sphere
             anneal) from picking ROIs deep in a bulk single-phase region
-            with no such core nearby (confirmed against a real campaign
-            trajectory, 2026-09-22: an uncalibrated ``threshold`` let
-            through ROIs 50+ A from the nearest condensed-phase atom).
-            ``None`` (with ``phase_cutoff``) applies no filter -- the
-            right choice for ``topology_mode="bulk"``, where there's no
-            separate phase to be near.
+            with no such core nearby -- an uncalibrated ``threshold`` alone
+            can otherwise let through ROIs arbitrarily far from the nearest
+            condensed-phase atom. ``None`` (with ``phase_cutoff``) applies
+            no filter -- the right choice for ``topology_mode="bulk"``,
+            where there's no separate phase to be near.
         phase_cutoff: Distance (Angstrom) for the ``phase_species`` filter
             above. Required together with ``phase_species``; ignored (with
             a warning) if given alone.
@@ -183,13 +182,12 @@ def _near_any(
     zero-distance pair between its two copies in the combined structure --
     no special-casing needed.
 
-    Prefers matscipy's neighbor list (confirmed ~13x faster, and far less
-    memory-hungry, than ase's own at real campaign scale -- see
+    Prefers matscipy's neighbor list (confirmed dramatically faster, and far
+    less memory-hungry, than ase's own at real-world scale -- see
     ``committee_selection._tp_atoms_from_matscipy``'s docstring; confirmed
-    directly here too: ase's own neighbor list needed ~100GB/83s for one
-    real ~270k-atom candidates+targets structure at cutoff=6.0, vs. a few
-    seconds/GB expected from matscipy), falling back to
-    ``ase.neighborlist`` when matscipy isn't installed -- unlike the
+    directly here too, at a candidates+targets structure of a few hundred
+    thousand atoms), falling back to ``ase.neighborlist`` when matscipy
+    isn't installed -- unlike the
     ``ace`` backend's own neighbor list, this isn't guaranteed present
     (only via ``[ace_tensorpot_gpu]``, not ``[embedding]``/``[all]``).
     """

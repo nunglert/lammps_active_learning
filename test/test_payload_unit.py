@@ -57,19 +57,18 @@ def test_parse_jinja_template_renders_kwargs(tmp_path):
 
 
 def test_ace_template_dump_frequency_is_rendered_not_hardcoded():
-    """Regression test for the real campaign template: the dump line must
-    read ``{{ dump_frequency }}``, not a hardcoded ``1`` -- confirmed as the
-    cause of an unthinned, >20GB dump file in ~10 minutes on the real
-    206941-atom campaign system, 2026-09-11 (dump_frequency was silently
-    dropped upstream as an "unknown key" and never reached the template at
-    all).
+    """Regression test: the dump line must read ``{{ dump_frequency }}``,
+    not a hardcoded ``1`` -- confirmed as the cause of an unthinned,
+    multi-GB dump file within minutes on a large real system
+    (``dump_frequency`` was silently dropped upstream as an "unknown key"
+    and never reached the template at all).
 
     Renders a git-tracked copy of the real shipped template
     (test/data/lammps/lammps_ace.in.template), not a synthetic stand-in --
-    the actual campaign copy under experiments/rough_cu_water_al/ is
-    gitignored (campaign-specific working files), so it doesn't exist in a
-    fresh CI clone and can't be read directly here. Keep the two in sync by
-    hand; both files cross-reference each other in their header comments.
+    a live campaign's own working copy of this template is typically
+    gitignored (campaign-specific working files), so it can't be read
+    directly here in a fresh clone. Keep the two in sync by hand; both
+    files cross-reference each other in their header comments.
     """
     template_dir = Path(__file__).resolve().parent / "data" / "lammps"
 

@@ -31,14 +31,14 @@ forces -- the stdev is computed here).
 ``backend="ace"`` is the one exception to "one ASE calculator spanning the
 committee": it does NOT use ``pyace.PyACEEnsembleCalculator`` (confirmed,
 by reading its source, to be a pure CPU/Cython evaluator with no GPU code
-path at all -- unusably slow on a large system, e.g. ~40+ min for one real
-206941-atom campaign trajectory and still not finished). Instead it uses
+path at all -- unusably slow at real-world system sizes, effectively never
+finishing a single large frame in practice). Instead it uses
 ``tensorpotential``'s own re-implementation of ACE (the OLD, pre-GRACE-
 rename API, only installed in the ``ace_gpu_train`` env -- see
 ``pyproject.toml``'s ``[ace_tensorpot_gpu]`` extra comment), which is
-GPU-capable, plus ``matscipy`` for the neighbor list (confirmed 13.6x
-faster than ASE's own on a real 206941-atom campaign frame, identical pair
-count -- and also what the *current*, actively-maintained
+GPU-capable, plus ``matscipy`` for the neighbor list (confirmed an
+order of magnitude faster than ASE's own on a real large frame, identical
+pair count -- and also what the *current*, actively-maintained
 ``grace-tensorpotential`` package itself uses instead of ASE). Needs the
 ``[ace_tensorpot_gpu]`` extra (``matscipy`` -- a normal, portable
 dependency, declared there directly -- plus the old ``tensorpotential``
@@ -304,10 +304,11 @@ def _build_ace_tensorpotential_models(model_files: list, device: str) -> list:
     every trajectory frame. ``TensorPotential._evaluate`` is a
     ``tf.function`` with an explicit ``input_signature`` using dynamic
     (``None``) leading dimensions, so it traces its graph once regardless
-    of how many atoms/pairs any given frame has -- confirmed: a real
-    206941-atom frame's first ``evaluate()`` call took ~26s (incl. one-time
-    tracing), a second call ~2.6s. Re-instantiating a ``TensorPotential``
-    per frame would pay that tracing cost every frame instead of once.
+    of how many atoms/pairs any given frame has -- confirmed: a large real
+    frame's first ``evaluate()`` call takes roughly an order of magnitude
+    longer than a second call (one-time tracing cost). Re-instantiating a
+    ``TensorPotential`` per frame would pay that tracing cost every frame
+    instead of once.
 
     Args:
         model_files: Paths to the committee's pacemaker ``.yaml``/``.yace``
@@ -339,10 +340,10 @@ def _tp_atoms_from_matscipy(atoms, cutoff: float) -> dict:
     of ``tensorpotential.utils.utilities.generate_tp_atoms``'s ASE-based
     (``ase.neighborlist.NewPrimitiveNeighborList``) neighbor search.
 
-    Confirmed (see RESULTS.md) 13.6x faster on a real 206941-atom frame
-    (4.2s vs 57s) with an identical pair count, and is what the current,
-    actively-maintained ``grace-tensorpotential`` package itself already
-    uses instead of ASE's own neighbor list.
+    Confirmed an order of magnitude faster on a real large frame, with an
+    identical pair count, and is what the current, actively-maintained
+    ``grace-tensorpotential`` package itself already uses instead of ASE's
+    own neighbor list.
 
     Unlike ``generate_tp_atoms`` (fitting-data-prep code -- it reads
     ``atoms.get_potential_energy()``/``.get_forces()``), this never reads

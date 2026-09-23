@@ -7,11 +7,11 @@ and writes each to ``out/`` as both ``lammps-data`` (for the anneal step) and
 ``extxyz``, alongside a ``manifest.json`` describing every carved box.
 
 Streams the trajectory via ``ase.io.iread`` in two passes rather than
-``ase.io.read(index=":")`` once -- a real campaign trajectory here is
-multi-GB (a full-frame-count, uncertainty-tagged dump, not a handful of
-pre-picked peak frames, by design -- see ``CommitteeUncertaintySelector``'s
-module docstring), and loading every frame into memory at once was a real,
-avoidable memory cost given each phase only ever needs one frame at a time.
+``ase.io.read(index=":")`` once -- the input trajectory is a full-frame-count,
+uncertainty-tagged dump rather than a handful of pre-picked peak frames, by
+design (see ``CommitteeUncertaintySelector``'s module docstring), so it can
+be large enough that loading every frame into memory at once is an avoidable
+cost given each phase only ever needs one frame at a time.
 Pass 1 (:func:`find_rois` only, no carving) needs every frame exactly once,
 in order -- a plain streaming scan. Pass 2 needs only whichever frames
 survived ``max_num_structures``' cap, so it re-scans from the start and

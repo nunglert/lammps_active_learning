@@ -293,8 +293,17 @@ def test_embedding_annealer_array_job_builds_index_aligned_resources(
         "box_1.data",
         "box_2.data",
     ]
-    assert all(c.content["template_file"].startswith("../") for c in configs)
-    assert all(c.content["pair_coeff_path"].startswith("../") for c in configs)
+    # Exact prefix, not just startswith("../"): ArrayScriptTask places each
+    # box's calcdir at rootpath/calcdirs/<i> (remote_handler.core.remote_env.
+    # CALCDIRS_DIRNAME) -- two directories below where copy_path uploads
+    # shared resources, not one. A regression back to a single "../" here
+    # reproduces a real "template_file does not exist" failure at
+    # input_config.validate(), affecting every box identically.
+    assert all(
+        c.content["template_file"] == "../../embedding_anneal.in.j2"
+        for c in configs
+    )
+    assert all(c.content["pair_coeff_path"] == "../../model" for c in configs)
     assert [s.filename for s in structures] == [
         "box_0.data",
         "box_1.data",

@@ -91,11 +91,10 @@ class MatrixEmbeddingInput(ScriptInput):
             turns up (summed over every frame) exceeds this, only the
             ``max_num_structures`` with the highest per-atom uncertainty are
             actually carved/cleaned/written -- the rest are dropped before
-            any of that per-ROI work runs (confirmed needed, 2026-09-22: an
-            uncalibrated ``threshold`` combined with a rough, multi-island
-            interface produced 913 ROIs from a single 101-frame trajectory,
-            ~9x the previous iteration's batch, each one becoming its own
-            downstream ``EmbeddingAnnealer`` SLURM job). Ranking by
+            any of that per-ROI work runs. An uncalibrated ``threshold``
+            combined with a spatially fragmented interface can otherwise
+            produce far more ROIs than intended, each one becoming its own
+            downstream ``EmbeddingAnnealer`` SLURM job. Ranking by
             uncertainty (not e.g. frame order) keeps the genuinely most
             informative configs regardless of where in the trajectory they
             fall. ``None`` (default) applies no cap.

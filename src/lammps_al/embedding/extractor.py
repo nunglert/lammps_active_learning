@@ -268,11 +268,10 @@ class ROIExtractor(Selector):
         }
         # Omit rather than write null: remote_handler's ScriptInput.from_dict
         # Path()-converts every _path_fields key present in the JSON
-        # unconditionally, even when its value is null, raising a TypeError
-        # (confirmed against a real embed_extract job, 2026-09-22) --
-        # solvent_file is declared Optional specifically for campaigns like
-        # this one that use solvent_label instead, so it must stay absent
-        # from the JSON when unset, not present-as-null.
+        # unconditionally, even when its value is null, raising a TypeError.
+        # solvent_file is declared Optional specifically for callers that use
+        # solvent_label instead, so it must stay absent from the JSON when
+        # unset, not present-as-null.
         if solvent_file is not None:
             script_input["solvent_file"] = solvent_file.name
 

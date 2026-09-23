@@ -51,19 +51,24 @@ def _template_location(calcpath: Path, template_file: str) -> tuple[Path, str]:
 
     A plain filename lives directly in ``calcpath`` (``SingleScriptTask``'s
     convention: every box's own calcdir gets its own copy of everything). A
-    ``"../name"`` value (``ArrayScriptTask``'s convention: the deck template
-    is identical for every box, so ``EmbeddingAnnealer._build_array_task``
-    uploads it once as a shared resource one directory above each per-box
-    calcdir, instead of duplicating it into all of them) resolves against
-    ``calcpath.parent`` instead. The ``..`` has to be consumed here rather
-    than handed to ``jinja2.Environment.get_template`` -- ``FileSystemLoader``
-    rejects any ``..`` path *component* in a template name outright (a
-    traversal guard), so passing ``"../name"`` straight through would raise
-    ``TemplateNotFound`` even though the file genuinely exists there.
+    value with one or more leading ``"../"`` segments (``ArrayScriptTask``'s
+    convention: the deck template is identical for every box, so
+    ``EmbeddingAnnealer._build_array_task`` uploads it once as a shared
+    resource in the array's root -- currently two directories above each
+    per-box calcdir, ``rootpath/calcdirs/<i>``, though that nesting is
+    ``remote_handler``'s to change) resolves against however many parent
+    directories it climbs, rather than a hardcoded depth, so this stays
+    correct if that nesting ever does. The ``..`` has to be consumed here
+    rather than handed to ``jinja2.Environment.get_template`` --
+    ``FileSystemLoader`` rejects any ``..`` path *component* in a template
+    name outright (a traversal guard), so passing it straight through would
+    raise ``TemplateNotFound`` even though the file genuinely exists there.
     """
-    if template_file.startswith("../"):
-        return calcpath.parent, template_file[len("../") :]
-    return calcpath, template_file
+    search_dir = calcpath
+    while template_file.startswith("../"):
+        search_dir = search_dir.parent
+        template_file = template_file[len("../") :]
+    return search_dir, template_file
 
 
 def _render_deck(

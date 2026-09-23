@@ -63,9 +63,9 @@ class _CopyFileResource(Writeable):
     write_ase``, which always writes its local staging copy to a hardcoded
     ``temp_ase_file.extxyz`` (extxyz format) regardless of the *target*
     filename, then uploads those bytes verbatim -- confirmed directly against
-    the installed ``remote_handler`` (2026-09-22). Handed a box's already-
-    correctly-written ``.data`` (LAMMPS-data format) file, that would silently
-    replace its content with mislabeled extxyz text. This class instead
+    the installed ``remote_handler``. Handed a box's already-correctly-written
+    ``.data`` (LAMMPS-data format) file, that would silently replace its
+    content with mislabeled extxyz text. This class instead
     copies the file byte-for-byte via ``remote_fs.put``, the same primitive
     ``FileAllocator.copy_file`` uses -- no re-serialization, so no format
     mismatch is possible.
@@ -190,8 +190,8 @@ class EmbeddingAnnealer(Sampler):
             (``remote_handler.core.tasks.ArrayScriptTask``) instead of one
             independent ``SingleScriptTask`` per box. The extraction side
             can legitimately produce hundreds of ROIs in one iteration (a
-            rough, multi-island interface plus an uncalibrated ``threshold``
-            did exactly this on a real campaign, 2026-09-22 -- see
+            spatially fragmented interface, or an uncalibrated ``threshold``,
+            can each drive the candidate count up sharply -- see
             ``ROIExtractor.max_num_structures`` for the complementary fix on
             that side), and queuing that many independent jobs both floods
             the scheduler and, worse, was previously fully serial here (each
@@ -343,10 +343,16 @@ class EmbeddingAnnealer(Sampler):
 
         ``shared_prefix`` is ``""`` for a ``SingleScriptTask`` (the template/
         potential are copied into this box's own calcdir, so a bare filename
-        resolves directly) or ``"../"`` for an array job (they are uploaded
-        once as shared resources one directory above every per-box calcdir --
-        see ``embedding_anneal.py``'s ``_template_location`` for how the
-        remote payload resolves this back).
+        resolves directly) or ``"../../"`` for an array job: ``ArrayScriptTask``
+        places every per-box calcdir at ``rootpath/calcdirs/<i>`` (see
+        ``remote_handler.core.remote_env.CALCDIRS_DIRNAME``), while shared
+        resources land in ``rootpath`` itself via ``copy_path`` -- two levels
+        up from a per-box calcdir, not one (verified directly against
+        ``ArrayScriptTask``'s real remote layout, not just inferred from its
+        docstring). See ``embedding_anneal.py``'s ``_template_location`` for
+        how the remote payload resolves this back (it strips however many
+        leading ``"../"`` segments are given, rather than assuming a fixed
+        depth, so this stays correct even if that nesting ever changes).
         """
         return {
             "data_file": Path(entry["data_file"]).name,
@@ -429,7 +435,7 @@ class EmbeddingAnnealer(Sampler):
         configs: list[DictJSON] = []
         structures: list[_CopyFileResource] = []
         for entry in manifest:
-            anneal_input = self._anneal_input(entry, shared_prefix="../")
+            anneal_input = self._anneal_input(entry, shared_prefix="../../")
             configs.append(
                 DictJSON(
                     content=anneal_input,
