@@ -3,7 +3,7 @@
 Deliberately no panel registry or config-file layer (unlike jaxrens_al's
 ``jaxrens-al`` CLI, which spans many trainer/sampler backends across a
 maintained multi-user tool) -- this is one campaign, one committee family,
-5 panels, single user. A per-campaign wrapper is just a thin script calling
+single user. A per-campaign wrapper is just a thin script calling
 :func:`main` with that campaign's ``calchome`` and species list (campaign
 working directories are gitignored, not shipped with this repo).
 """
@@ -19,11 +19,15 @@ from alviz.mpl_utils import load_rc_params
 from alviz.pdf import merge_pdfs
 
 from lammps_al.dashboard import run_layout
+from lammps_al.dashboard.panels.annealer_thermo import AnnealerThermoPanel
 from lammps_al.dashboard.panels.committee_parity import (
     CommitteeParityPanel,
     HeldOutParityPanel,
 )
+from lammps_al.dashboard.panels.roi_spatial import ROISpatialPanel
+from lammps_al.dashboard.panels.sampler_thermo import SamplerThermoPanel
 from lammps_al.dashboard.panels.species_parity import SpeciesForceParityPanel
+from lammps_al.dashboard.panels.training_fit import TrainingConvergencePanel
 from lammps_al.dashboard.panels.uncertainty import (
     UncertaintyDepthProfilePanel,
     UncertaintyTrendPanel,
@@ -56,6 +60,54 @@ def build_entries_for_iteration(
                 config_files, model_files, species, datapath=datapath
             )
         )
+    else:
+        logger.info(
+            "iteration %d: skipping committee/species parity panels "
+            "(model_files=%d, config_files=%d).",
+            it,
+            len(model_files),
+            len(config_files),
+        )
+
+    if run_layout.trainer_calcdirs_for_iteration(calchome, it):
+        entries.append(
+            TrainingConvergencePanel(calchome, progress, it, datapath=datapath)
+        )
+    else:
+        logger.info(
+            "iteration %d: skipping training-convergence panel (no trainer "
+            "calcdirs found).",
+            it,
+        )
+
+    if run_layout.selector_output_manifest(calchome, progress, it):
+        entries.append(
+            ROISpatialPanel(calchome, progress, it, datapath=datapath)
+        )
+    else:
+        logger.info(
+            "iteration %d: skipping ROI spatial panel (no selector_output "
+            "recorded).",
+            it,
+        )
+
+    if run_layout.sampler_lmp_log(calchome, it):
+        entries.append(SamplerThermoPanel(calchome, it, datapath=datapath))
+    else:
+        logger.info(
+            "iteration %d: skipping sampler thermo panel (no sampler "
+            "LAMMPS log found).",
+            it,
+        )
+
+    if run_layout.annealer_lmp_logs_for_iteration(calchome, it):
+        entries.append(AnnealerThermoPanel(calchome, it, datapath=datapath))
+    else:
+        logger.info(
+            "iteration %d: skipping annealer thermo panel (no annealer "
+            "LAMMPS logs found).",
+            it,
+        )
 
     prev_models = trained[it - 1] if 0 <= it - 1 < len(trained) else []
     if prev_models:
@@ -63,6 +115,13 @@ def build_entries_for_iteration(
             HeldOutParityPanel(
                 calchome, progress, it, prev_models, datapath=datapath
             )
+        )
+    else:
+        logger.info(
+            "iteration %d: skipping held-out parity panel (no trained "
+            "model recorded for iteration %d).",
+            it,
+            it - 1,
         )
     return entries
 
@@ -83,16 +142,29 @@ def build_campaign_entries(calchome, progress, *, datapath) -> list:
     ]
 
 
-def _any_entry_has_data(board: Dashboard) -> bool:
+def _any_entry_has_data(board: Dashboard, *, page_label: str) -> bool:
     """Whether at least one of ``board``'s entries actually computed data.
 
     ``Dashboard.render`` fails individual entries silently (logs + excludes
     them), so a page can otherwise be "successfully" rendered and saved
     while every one of its panels failed to compute (e.g. no data exists
     yet for that iteration) -- an essentially blank PDF page. Checking this
-    lets callers skip saving such a page entirely.
+    lets callers skip saving such a page entirely. Also logs a per-entry
+    ok/failed summary for ``page_label`` -- ``Dashboard.render``'s own
+    per-entry failure logging already fires (with the exception), but
+    nowhere otherwise summarizes which entries on a page actually rendered.
     """
-    return any(e.data is not None for e in board.entries)
+    ok = [e.name for e in board.entries if e.data is not None]
+    failed = [e.name for e in board.entries if e.data is None]
+    logger.info(
+        "%s: %d/%d panel(s) rendered (ok=%s, failed=%s).",
+        page_label,
+        len(ok),
+        len(board.entries),
+        ok,
+        failed,
+    )
+    return bool(ok)
 
 
 def build_dashboard_pdfs(
@@ -113,6 +185,11 @@ def build_dashboard_pdfs(
     n_iterations = len(
         run_layout.trained_models_per_iteration(calchome, progress)
     )
+    logger.info(
+        "Building dashboard for %s: %d iteration(s) with a trained model.",
+        calchome,
+        n_iterations,
+    )
     for it in range(n_iterations):
         page_datapath = out_dir / f"iter_{it}"
         page_datapath.mkdir(parents=True, exist_ok=True)
@@ -120,10 +197,18 @@ def build_dashboard_pdfs(
             calchome, progress, it, species, datapath=page_datapath
         )
         if not entries:
+            logger.info(
+                "iteration %d: no panels built at all -- skipping page.", it
+            )
             continue
         board = Dashboard.from_entries(entries, only=only, exclude=exclude)
         board.render(suptitle=f"iteration {it}")
-        if not _any_entry_has_data(board):
+        if not _any_entry_has_data(board, page_label=f"iteration {it}"):
+            logger.info(
+                "iteration %d: every panel failed to compute -- skipping "
+                "page (see per-panel errors above).",
+                it,
+            )
             continue
         page_path = page_datapath / "page.pdf"
         board.savefig(page_path)
@@ -139,11 +224,12 @@ def build_dashboard_pdfs(
             campaign_entries, only=only, exclude=exclude
         )
         board.render(suptitle="campaign summary")
-        if _any_entry_has_data(board):
+        if _any_entry_has_data(board, page_label="campaign summary"):
             page_path = campaign_datapath / "page.pdf"
             board.savefig(page_path)
             pages.append(page_path)
 
+    logger.info("Built %d dashboard page(s).", len(pages))
     return pages
 
 
@@ -170,7 +256,26 @@ def main(argv=None) -> int:
     parser.add_argument(
         "--exclude", nargs="+", default=None, help="Skip these panels"
     )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        action="store_true",
+        help=(
+            "Debug-level logging (per-panel skip reasons, calcdir lookups, "
+            "..) -- INFO level is the default without this flag."
+        ),
+    )
     args = parser.parse_args(argv)
+
+    # No caller configures logging for this CLI otherwise -- without a
+    # handler, Python's root logger only surfaces WARNING+ (its "handler of
+    # last resort"), silently swallowing every INFO/DEBUG log this module
+    # and run_layout/committee_eval emit (e.g. exactly why a panel/page was
+    # skipped), which is the whole point of having them.
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(levelname)s %(name)s: %(message)s",
+    )
 
     load_rc_params()
     calchome = Path(args.calchome)

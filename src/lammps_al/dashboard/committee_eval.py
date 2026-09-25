@@ -11,9 +11,13 @@ reuses that directly rather than inventing a second pyace-loading path.
 
 from __future__ import annotations
 
+import logging
+import time
 from pathlib import Path
 
 import numpy as np
+
+logger = logging.getLogger(__name__)
 
 
 def _default_committee_calculator(model_files, device: str = "cpu"):
@@ -27,9 +31,60 @@ def _default_committee_calculator(model_files, device: str = "cpu"):
         _build_committee_calculator,
     )
 
-    return _build_committee_calculator(
+    logger.info(
+        "Building committee calculator from %d model file(s) (device=%s): %s",
+        len(model_files),
+        device,
+        [str(p) for p in model_files],
+    )
+    start = time.monotonic()
+    calc = _build_committee_calculator(
         "ace", [str(p) for p in model_files], device
     )
+    logger.debug(
+        "Committee calculator built in %.1fs.", time.monotonic() - start
+    )
+    return calc
+
+
+def read_pacemaker_metrics(calcdir, *, split: str = "train"):
+    """A single committee member's own fit-convergence curve, as pacemaker
+    already computed it -- no re-scoring needed.
+
+    Unlike an ensemble parity check (see this module's own ``score_with_
+    committee``, and ``committee_parity.py``'s module docstring), this is
+    strictly per-member: pacemaker's ``metrics.txt``/``test_metrics.txt``
+    log one row per fitting iteration for *that* member's own fit against
+    *its own* (possibly bagged/resampled -- confirmed empirically to differ
+    member-to-member) training subset, so there is no cross-member
+    alignment question here at all, and reading it is exact, not an
+    approximation of the re-scored result.
+
+    Args:
+        calcdir: One committee member's trainer calcdir (e.g. from
+            ``run_layout.trainer_calcdirs_for_iteration``), containing
+            pacemaker's raw ``metrics.txt``/``test_metrics.txt``.
+        split: ``"train"`` (``metrics.txt``, every fitting iteration) or
+            ``"test"`` (``test_metrics.txt``, sparser checkpoints).
+
+    Returns:
+        A ``pandas.DataFrame`` with pacemaker's own columns (at least
+        ``iter_num``, ``loss``, ``rmse_epa``, ``rmse_f_comp``).
+
+    Raises:
+        FileNotFoundError: If this calcdir has no such metrics file (e.g.
+            still running, or a fit that failed before pacemaker wrote one).
+    """
+    import pandas as pd
+
+    calcdir = Path(calcdir)
+    filename = "metrics.txt" if split == "train" else f"{split}_metrics.txt"
+    path = calcdir / filename
+    if not path.exists():
+        raise FileNotFoundError(f"No {filename} in {calcdir}.")
+    df = pd.read_csv(path, sep=r"\s+")
+    logger.debug("Read %d fitting-iteration row(s) from %s.", len(df), path)
+    return df
 
 
 def score_with_committee(
@@ -59,6 +114,13 @@ def score_with_committee(
     model_files = [Path(p) for p in model_files]
     calc = _build_calculator(model_files, device)
 
+    logger.info(
+        "Scoring %d configuration(s) with the committee (forces=%s) -- this "
+        "re-runs full committee inference, not a cached read.",
+        len(atoms_list),
+        want_forces,
+    )
+    start = time.monotonic()
     energies = []
     forces = [] if want_forces else None
     for atoms in atoms_list:
@@ -67,4 +129,11 @@ def score_with_committee(
         energies.append(float(scored.get_potential_energy()))
         if want_forces:
             forces.append(np.asarray(scored.get_forces(), dtype=float))
+    elapsed = time.monotonic() - start
+    logger.info(
+        "Scored %d configuration(s) in %.1fs (%.2fs/config).",
+        len(atoms_list),
+        elapsed,
+        elapsed / len(atoms_list) if atoms_list else 0.0,
+    )
     return energies, forces
