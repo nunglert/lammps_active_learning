@@ -65,10 +65,6 @@ ace_tensorpot_gpu = [
 embedding = [
     "ovito"
 ]
-# Parity/uncertainty analysis pipeline (see src/lammps_al/dashboard/) --
-# needs only alviz (the shared plotting engine); the committee/species
-# parity panels additionally need [ace] (pyace) in the same environment,
-# imported lazily so this extra alone stays lightweight.
 dashboard = [
     "alviz @ git+ssh://git@gitlab.tuwien.ac.at/e165-03-1_theoretische_materialchemie/madsen-s-research-group/alviz.git@main",
 ]

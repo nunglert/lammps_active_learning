@@ -1,0 +1,43 @@
+# A copy of this file is git-tracked at test/data/lammps/
+# lammps_ace.in.template (this experiments/ tree is gitignored, so tests
+# can't read it directly) -- keep that copy in sync when editing this file;
+# see its own header comment.
+variable    dt equal 0.0005
+variable model_file index {{ model_file }}
+
+units       metal
+atom_style  atomic
+atom_modify map yes
+newton      on
+boundary    p p p
+
+read_data   {{ data_file }}
+
+# {{ lammps_pair_style }} is the literal pair_style line for backend="ace"/
+# "grace" (no compile step, unlike MACE's mliap/mace fork -- see
+# lammps_sampling.py's module docstring). For ACE: "pace".
+pair_style  {{ lammps_pair_style }}
+pair_coeff  * *     ${model_file} Cu H O
+
+mass        1       63.546
+mass        2       1.008
+mass        3       15.999
+
+velocity    all create 300 {{ seed }} dist gaussian rot yes mom yes sum yes
+
+thermo          100
+thermo_style    custom step temp etotal press
+
+dump    d_nvt   all custom {{ dump_frequency }} {{ dump_file }} id type xu yu zu vx vy vz
+
+#########################################################
+# Committee-driven NVT sampling run
+#########################################################
+
+fix     md_nvt  all nvt temp 300 300 $(100.0*dt)
+
+run     2000
+
+unfix   md_nvt
+
+write_data {{ final_data_file }}

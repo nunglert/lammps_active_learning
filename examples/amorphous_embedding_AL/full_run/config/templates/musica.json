@@ -1,0 +1,11 @@
+{
+  "remote_machine": "musica",
+  "partition": "zen4_0768",
+  "conda_env": "lammps_al",
+  "conda_source": "/data/fs201236/nu90319/miniconda3/bin/activate",
+  "savepath": "/data/fs201236/nu90319/dump/remote_handler",
+  "template": "/home/nunglert/code/lammps_active_learning/experiments/rough_cu_water_al/config/templates/musica.sh.j2",
+  "resilient_connection": true,
+  "connection_retry_interval": 60,
+  "connection_max_wait": null
+}
