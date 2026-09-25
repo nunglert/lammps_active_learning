@@ -20,6 +20,10 @@ from alviz.pdf import merge_pdfs
 
 from lammps_al.dashboard import run_layout
 from lammps_al.dashboard.panels.annealer_thermo import AnnealerThermoPanel
+from lammps_al.dashboard.panels.box_structure import (
+    BoxCompositionPanel,
+    BoxRDFPanel,
+)
 from lammps_al.dashboard.panels.committee_parity import (
     CommitteeParityPanel,
     HeldOutParityPanel,
@@ -84,10 +88,35 @@ def build_entries_for_iteration(
         entries.append(
             ROISpatialPanel(calchome, progress, it, datapath=datapath)
         )
+        entries.append(
+            BoxCompositionPanel(calchome, progress, it, datapath=datapath)
+        )
+        entries.append(BoxRDFPanel(calchome, progress, it, datapath=datapath))
     else:
         logger.info(
-            "iteration %d: skipping ROI spatial panel (no selector_output "
-            "recorded).",
+            "iteration %d: skipping ROI spatial/box composition/box RDF "
+            "panels (no selector_output recorded).",
+            it,
+        )
+
+    if run_layout.annealed_configs(calchome, progress, it):
+        # Distinct `name=` from the pre-anneal instance above -- Entry.name
+        # doubles as its JSON cache filename, so two panels sharing one
+        # would silently clobber each other's cached data.
+        entries.append(
+            BoxRDFPanel(
+                calchome,
+                progress,
+                it,
+                source="post_anneal",
+                name="box_rdf_post_anneal",
+                datapath=datapath,
+            )
+        )
+    else:
+        logger.info(
+            "iteration %d: skipping post-anneal box RDF panel (no "
+            "annealer_output recorded).",
             it,
         )
 

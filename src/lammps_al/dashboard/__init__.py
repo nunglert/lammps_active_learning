@@ -9,6 +9,7 @@ calling :func:`cli.main` with that campaign's ``calchome`` and species list
 (campaign working directories, e.g. ``experiments/``, are gitignored --
 campaign-specific, not shipped with this repo).
 
-Needs the ``[dashboard]`` extra (``alviz``); the committee/species panels
-additionally need ``[ace]`` (``pyace``) in the same environment.
+Needs the ``[dashboard]`` extra (``alviz``, ``matscipy``); the committee/
+species panels additionally need ``[ace]`` (``pyace``) in the same
+environment.
 """

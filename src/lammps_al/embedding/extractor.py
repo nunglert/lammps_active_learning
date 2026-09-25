@@ -334,6 +334,15 @@ class ROIExtractor(Selector):
                     "frame": 0,
                     "roi_index": 0,
                     "roi_position": [self.box_x, self.box_y, self.box_z_below],
+                    # Mocked, spread out (unlike "roi_position" above, which
+                    # is deliberately constant -- see extract.py's own
+                    # comment on this field): stub-mode consumers exercising
+                    # a spatial spread over ROIs (e.g. the dashboard's
+                    # roi_spatial panel) shouldn't see every stub ROI at an
+                    # identical point.
+                    "roi_position_orig": (
+                        np.random.uniform(0, 2 * self.box_x, 3)
+                    ).tolist(),
                     "normal": None,
                     "data_file": data_name,
                     "extxyz_file": None,

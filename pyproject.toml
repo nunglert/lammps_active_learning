@@ -67,6 +67,10 @@ embedding = [
 ]
 dashboard = [
     "alviz @ git+ssh://git@gitlab.tuwien.ac.at/e165-03-1_theoretische_materialchemie/madsen-s-research-group/alviz.git@main",
+    # RDFs in panels.box_structure (structure_stats.compute_partial_rdf) --
+    # same portable PyPI package as ace_tensorpot_gpu's matscipy, just also
+    # needed here, independent of that extra.
+    "matscipy",
 ]
 dev = [
     "pytest",

@@ -204,6 +204,30 @@ def iteration_dirs(calchome) -> list:
     return sorted(dirs, key=lambda p: int(p.name))
 
 
+def annealed_configs(calchome, progress, it: int):
+    """This iteration's recorded, annealed (post-anneal) box configs, or
+    ``None``.
+
+    ``annealer_output`` is a single combined extxyz -- ``EmbeddingAnnealer.
+    get_sampled_configs()`` writes every box's own ``out/samples.extxyz``
+    concatenated into one file (skipping any box whose anneal failed), so
+    reading it back gives every successfully-annealed box's *final*
+    structure as one flat frame list. Unlike the pre-anneal manifest, frame
+    position here does not reliably correspond to a particular box index
+    (a failed box is simply absent, shifting everything after it) -- fine
+    for anything that pools across boxes (e.g. an aggregate RDF), not for
+    anything that needs to match a specific box back to its manifest entry.
+    """
+    if it < 0 or it >= len(progress):
+        logger.debug("iteration %d out of range for annealer_output.", it)
+        return None
+    rels = progress[it].get("annealer_output", []) or []
+    if not rels:
+        logger.debug("iteration %d has no annealer_output yet.", it)
+        return None
+    return (Path(calchome) / rels[0]).resolve()
+
+
 def sampler_uncertainty_trajectory(calchome, progress, it: int):
     """The full uncertainty-tagged trajectory for iteration ``it``, or
     ``None``.

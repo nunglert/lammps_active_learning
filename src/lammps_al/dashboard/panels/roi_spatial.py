@@ -6,6 +6,16 @@ themselves -- just each ROI's center, read from the recorded
 a 2D scatter colored by depth. Answers "how spread out / clustered were
 this iteration's ROIs" at a glance, without needing to open any structure
 viewer.
+
+Plots ``roi_position_orig`` (the ROI's position in the *source trajectory
+frame*, before carving), not ``roi_position`` (the ROI's center *within its
+own carved box*, always ~box_size/2 by construction regardless of where the
+ROI actually came from -- confirmed empirically: every entry in a real
+manifest had the identical "roi_position", since it's just the carved box's
+own center). ``roi_position_orig`` was only added to ``extract.py``'s
+manifest once this distinction was noticed; a manifest written before that
+has no such field, hence the explicit, loud error below rather than a
+silent (and wrong) fallback to "roi_position".
 """
 
 from __future__ import annotations
@@ -74,9 +84,18 @@ class ROISpatialPanel(Entry):
                 f"Selector manifest for iteration {self._iteration} is "
                 "empty (0 ROIs extracted)."
             )
+        if "roi_position_orig" not in manifest[0]:
+            raise ValueError(
+                f"Manifest {manifest_path} has no 'roi_position_orig' field "
+                "(written before that field was added to extract.py -- its "
+                "'roi_position' is the ROI's center within its own carved "
+                "box, not its source-frame location, so it can't stand in "
+                "here). Re-run extraction for this iteration to get a "
+                "manifest with the field this panel needs."
+            )
         x, y, z, box_index = [], [], [], []
         for entry in manifest:
-            pos = entry["roi_position"]
+            pos = entry["roi_position_orig"]
             x.append(pos[0])
             y.append(pos[1])
             z.append(pos[2])

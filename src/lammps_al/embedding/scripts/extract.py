@@ -215,6 +215,15 @@ for frame_idx, atoms in enumerate(ase.io.iread(trajectory_path, index=":")):
                 "frame": frame_idx,
                 "roi_index": int(roi_index),
                 "roi_position": roi_position.tolist(),
+                # Where this ROI actually sat in the source trajectory frame,
+                # before carving/re-centering -- distinct from
+                # "roi_position" above (the ROI's center *within its own
+                # carved box*, always ~box_size/2 regardless of where the
+                # ROI came from -- load-bearing for EmbeddingAnnealer's
+                # frozen-core placement, so kept as-is rather than repointed
+                # at this). Only this field is useful for a spatial map of
+                # where ROIs were extracted from across the campaign.
+                "roi_position_orig": roi_position_orig.tolist(),
                 "normal": normal.tolist() if normal is not None else None,
                 "data_file": data_name,
                 "extxyz_file": extxyz_name,
