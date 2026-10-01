@@ -9,6 +9,8 @@ from lammps_al.dashboard.panels import (  # noqa: F401
     annealer_thermo,
     box_structure,
     committee_parity,
+    error_analysis,
+    pipeline,
     roi_spatial,
     sampler_thermo,
     species_parity,

@@ -52,10 +52,20 @@ def _fake_score_with_committee(model_files, atoms_list, **kwargs):
     return energies, forces
 
 
+def _fake_committee_force_spread(model_files, atoms_list, **kwargs):
+    forces = [np.asarray(a.arrays["REF_forces"]) + 0.01 for a in atoms_list]
+    spread = [np.full((len(a), 3), 0.05) for a in atoms_list]
+    return forces, spread
+
+
 @pytest.fixture(autouse=True)
 def _patch_committee_scoring(monkeypatch):
-    """No real pyace anywhere in this file -- both panel modules that
-    import score_with_committee get the fake."""
+    """No real pyace anywhere in this file -- every panel module that
+    scores with the committee gets a fake."""
+    monkeypatch.setattr(
+        "lammps_al.dashboard.panels.error_analysis.committee_force_spread",
+        _fake_committee_force_spread,
+    )
     monkeypatch.setattr(
         "lammps_al.dashboard.panels.committee_parity.score_with_committee",
         _fake_score_with_committee,
@@ -234,19 +244,22 @@ def test_default_specs_gate_on_view_and_inputs(
     ctx0 = iteration_context(two_iteration_calchome, progress, 0, species)
     assert assemble(ctx0, datapath=tmp_path) == []
 
-    # Iteration 1: models + configs + a previous committee; no selector/
-    # annealer/LAMMPS artifacts -> only the parity panels.
+    # Iteration 1: models + configs + a previous committee + an uncertainty
+    # trajectory; no selector/annealer/LAMMPS artifacts.
     ctx1 = iteration_context(two_iteration_calchome, progress, 1, species)
     assert _names(assemble(ctx1, datapath=tmp_path)) == [
         "committee_parity",
         "species_force_parity",
+        "uncertainty_timeline",
         "held_out_parity",
+        "uncertainty_calibration",
     ]
 
     summary = campaign_context(
         two_iteration_calchome, progress, range(2), species
     )
     assert _names(assemble(summary, datapath=tmp_path)) == [
+        "pipeline_attrition",
         "uncertainty_trend",
         "uncertainty_depth_profile",
     ]
@@ -285,11 +298,13 @@ def test_panel_config_disable_add_and_species_override(
     assert _names(entries) == [
         "committee_parity",
         "species_force_parity",
+        "uncertainty_timeline",
+        "uncertainty_calibration",
         "species_force_parity_cu",
     ]
     # Unset `species` inherits the run-global list; an explicit one wins.
     assert entries[1]._species == ["Cu", "H", "O"]
-    assert entries[2]._species == ["Cu"]
+    assert entries[-1]._species == ["Cu"]
 
 
 def test_panel_config_panels_replaces_defaults(
@@ -362,3 +377,30 @@ def test_main_rejects_unknown_config_key(tmp_path, two_iteration_calchome):
     (two_iteration_calchome / "dashboard.yaml").write_text("specis: [Cu]\n")
     with pytest.raises(ValueError, match="specis"):
         cli.main([str(two_iteration_calchome)])
+
+
+def test_main_passes_grid_sizing_from_config(
+    monkeypatch, tmp_path, two_iteration_calchome
+):
+    pytest.importorskip("yaml")
+    (two_iteration_calchome / "dashboard.yaml").write_text(
+        "ncols: 3\nwidth-per-panel: 5.5\n"
+    )
+    seen = []
+    real = cli.Dashboard.from_entries
+
+    def spy(entries, **kwargs):
+        seen.append(kwargs)
+        return real(entries, **kwargs)
+
+    monkeypatch.setattr(cli.Dashboard, "from_entries", spy)
+    output = tmp_path / "dashboard.pdf"
+
+    assert (
+        cli.main([str(two_iteration_calchome), "--output", str(output)]) == 0
+    )
+    assert seen
+    for kwargs in seen:
+        assert kwargs["ncols"] == 3
+        assert kwargs["width_per_panel"] == 5.5
+        assert kwargs["height_per_panel"] == 4.0

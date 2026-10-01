@@ -8,6 +8,8 @@ need no committee at all -- they read per-atom ``uncertainty`` arrays
 directly off synthetic sampler trajectories.
 """
 
+import json
+
 import numpy as np
 import pytest
 from ase import Atoms
@@ -26,12 +28,23 @@ from lammps_al.dashboard.panels.committee_parity import (  # noqa: E402
     CommitteeParityPanel,
     HeldOutParityPanel,
 )
+from lammps_al.dashboard.panels.error_analysis import (  # noqa: E402
+    ErrorVsROIDistancePanel,
+    UncertaintyCalibrationPanel,
+)
+from lammps_al.dashboard.panels.pipeline import (  # noqa: E402
+    PipelineAttritionPanel,
+)
 from lammps_al.dashboard.panels.species_parity import (  # noqa: E402
     SpeciesForceParityPanel,
     SpeciesParityData,
 )
+from lammps_al.dashboard.panels.training_fit import (  # noqa: E402
+    TrainingParityPanel,
+)
 from lammps_al.dashboard.panels.uncertainty import (  # noqa: E402
     UncertaintyDepthProfilePanel,
+    UncertaintyTimelinePanel,
     UncertaintyTrendPanel,
 )
 
@@ -95,6 +108,8 @@ def test_committee_parity_panel(monkeypatch, tmp_path, evaluated_extxyz):
 
     assert len(panel.data.e_obs) == 3
     assert panel.data.e_rmse == pytest.approx(0.1)
+    for ax in (panel.ax_e, panel.ax_f):
+        assert all(c.get_rasterized() for c in ax.collections)
 
 
 def test_committee_parity_panel_no_configs_raises(tmp_path):
@@ -256,6 +271,14 @@ def _write_uncertainty_traj(tmp_path, it, frames):
     return path
 
 
+def _render(panel):
+    board = Dashboard(1, 1, fail_silently=False)
+    board.register_entry(panel, ("0", "0"))
+    board.allocate_panels()
+    board.compute_data()
+    board.plot_panels()
+
+
 def test_uncertainty_trend_panel(tmp_path):
     trajectories = {
         # Deliberately out of order: the panel sorts by iteration.
@@ -329,6 +352,275 @@ def test_uncertainty_depth_profile_panel_no_interface_species_skipped(
         {0: path},
         interface_species=("Ag",),
         datapath=tmp_path,
+    )
+    with pytest.raises(ValueError):
+        panel.compute_data({})
+
+
+# ---------------------------------------------------------------------------
+# UncertaintyTimelinePanel
+# ---------------------------------------------------------------------------
+def test_uncertainty_timeline_panel_locates_rois(tmp_path):
+    configs = []
+    for step, unc in ((0, [0.1, 0.2, 0.3]), (50, [0.4, 0.9, 0.5])):
+        atoms = Atoms(
+            "CuHO", positions=np.zeros((3, 3)), cell=np.eye(3) * 20, pbc=True
+        )
+        atoms.arrays["uncertainty"] = np.asarray(unc)
+        atoms.info["timestep"] = step
+        configs.append(atoms)
+    traj = tmp_path / "u.extxyz"
+    ase_io.write(traj, configs)
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps([{"index": 0, "frame": 1, "roi_index": 1}]))
+
+    panel = UncertaintyTimelinePanel(
+        traj, manifest_path=manifest, datapath=tmp_path
+    )
+    _render(panel)
+
+    assert panel.data.step == [0.0, 50.0]
+    assert panel.data.max == pytest.approx([0.3, 0.9])
+    assert panel.data.mean == pytest.approx([0.2, 0.6])
+    assert panel.data.roi_step == [50.0]
+    assert panel.data.roi_uncertainty == pytest.approx([0.9])
+
+
+# ---------------------------------------------------------------------------
+# PipelineAttritionPanel
+# ---------------------------------------------------------------------------
+def test_pipeline_attrition_panel_counts_and_names_losses(tmp_path):
+    rng = np.random.default_rng(4)
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps([{"index": i} for i in range(3)]))
+    ok_log = tmp_path / "ok.log"
+    ok_log.write_text("Step Temp\n0 300\n")
+    bad_log = tmp_path / "bad.log"
+    bad_log.write_text(
+        "Step Temp\n80000 5311\nERROR on proc 0: Particle outside "
+        "surface of region\n"
+    )
+    configs = tmp_path / "evaluated.extxyz"
+    ase_io.write(configs, [_make_config(rng, e_ref=-1.0)])
+
+    panel = PipelineAttritionPanel(
+        {
+            1: {
+                "selector_manifest": manifest,
+                "annealer_boxes": [
+                    ("0", True, ok_log),
+                    ("1", False, bad_log),
+                    ("2", True, ok_log),
+                ],
+                "dft_calcs": [("0", True), ("1", False)],
+                "config_files": [configs],
+                "prev_config_files": [],
+            },
+            2: {
+                "selector_manifest": manifest,
+                "annealer_boxes": [],
+                "dft_calcs": [],
+                "config_files": [],
+                "prev_config_files": [],
+            },
+        },
+        datapath=tmp_path,
+    )
+    _render(panel)
+
+    assert panel.data.counts["1"] == [3, 3, 2, 2, 1, 1]
+    # Stages that never ran are None, not 0.
+    assert panel.data.counts["2"] == [3, None, None, None, None, None]
+    assert panel.data.notes == [
+        "it1 anneal box 1: ERROR on proc 0: Particle outside surface of "
+        "region",
+        "it1 DFT calcdir 1: not finished",
+    ]
+
+
+# ---------------------------------------------------------------------------
+# UncertaintyCalibrationPanel / ErrorVsROIDistancePanel
+# ---------------------------------------------------------------------------
+def _labelled(positions, cell=20.0):
+    atoms = Atoms(
+        "H" * len(positions),
+        positions=positions,
+        cell=np.eye(3) * cell,
+        pbc=True,
+    )
+    atoms.info["REF_energy"] = -1.0
+    atoms.arrays["REF_forces"] = np.zeros((len(positions), 3))
+    return atoms
+
+
+def _patch_spread(monkeypatch, spread_of, error_of):
+    """Fake committee: per-atom spread/error as functions of position."""
+    calls = []
+
+    def fake(model_files, atoms_list, **kwargs):
+        calls.append(len(atoms_list))
+        forces, spread = [], []
+        for atoms in atoms_list:
+            e = error_of(atoms.positions)
+            forces.append(atoms.arrays["REF_forces"] + e[:, None])
+            spread.append(np.repeat(spread_of(atoms.positions)[:, None], 3, 1))
+        return forces, spread
+
+    monkeypatch.setattr(
+        "lammps_al.dashboard.panels.error_analysis.committee_force_spread",
+        fake,
+    )
+    return calls
+
+
+def test_uncertainty_calibration_panel_perfectly_ranked(monkeypatch, tmp_path):
+    # Error grows with spread -> Spearman rho == 1.
+    _patch_spread(
+        monkeypatch,
+        spread_of=lambda pos: 0.01 * (1 + pos[:, 0]),
+        error_of=lambda pos: 0.02 * (1 + pos[:, 0]),
+    )
+    path = tmp_path / "evaluated.extxyz"
+    ase_io.write(
+        path, [_labelled([[float(x), 0.0, 0.0] for x in range(0, 12, 2)])]
+    )
+
+    # cutoff_radius below the 2 Å spacing: aggregation is the atom itself.
+    panel = UncertaintyCalibrationPanel(
+        [path], [], ["m.yaml"], cutoff_radius=0.5, nbins=3, datapath=tmp_path
+    )
+    _render(panel)
+
+    assert len(panel.data.error) == 6
+    assert panel.data.spearman == pytest.approx(1.0)
+    assert len(panel.data.bin_uncertainty) == 3
+
+
+def test_error_vs_roi_distance_panel_bins_with_mic(monkeypatch, tmp_path):
+    _patch_spread(
+        monkeypatch,
+        spread_of=lambda pos: np.full(len(pos), 0.05),
+        error_of=lambda pos: np.where(pos[:, 0] < 0, 0.8, 0.1),
+    )
+    center = [5.0, 5.0, 5.0]
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps([{"index": 0, "roi_position": center}] * 2))
+    path = tmp_path / "evaluated.extxyz"
+    # 0.5 Å and 2.5 Å from the center, plus an unwrapped atom at x=-6.5
+    # that is 11.5 Å away naively but 8.5 Å under the minimum image (20 Å
+    # cell).
+    ase_io.write(
+        path,
+        [_labelled([[5.5, 5.0, 5.0], [7.5, 5.0, 5.0], [-6.5, 5.0, 5.0]])],
+    )
+
+    panel = ErrorVsROIDistancePanel(
+        [path], [], ["m.yaml"], manifest, bin_width=1.0, datapath=tmp_path
+    )
+    _render(panel)
+
+    d = panel.data
+    by_bin = {
+        c: (n, e)
+        for c, n, e in zip(d.bin_centers, d.counts, d.error_median)
+        if n
+    }
+    assert by_bin == {
+        0.5: (1, pytest.approx(0.1 * np.sqrt(3))),
+        2.5: (1, pytest.approx(0.1 * np.sqrt(3))),
+        8.5: (1, pytest.approx(0.8 * np.sqrt(3))),
+    }
+    assert max(d.bin_centers) < 9  # no 12 Å bin: mic was applied
+
+
+def test_error_panels_share_one_scoring_pass(monkeypatch, tmp_path):
+    calls = _patch_spread(
+        monkeypatch,
+        spread_of=lambda pos: np.full(len(pos), 0.05),
+        error_of=lambda pos: np.full(len(pos), 0.1),
+    )
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps([{"index": 0, "roi_position": [0, 0, 0]}]))
+    path = tmp_path / "evaluated.extxyz"
+    ase_io.write(path, [_labelled([[1.0, 0, 0], [3.0, 0, 0]])])
+
+    board = Dashboard(1, 2, fail_silently=False)
+    board.register_entry(
+        UncertaintyCalibrationPanel([path], [], ["m.yaml"], datapath=tmp_path),
+        ("0", "0"),
+    )
+    board.register_entry(
+        ErrorVsROIDistancePanel(
+            [path], [], ["m.yaml"], manifest, datapath=tmp_path
+        ),
+        ("0", "1"),
+    )
+    board.allocate_panels()
+    board.compute_data()
+
+    assert calls == [1]
+
+
+def _write_pacemaker_preds(calcdir, split, n_atoms, e_shift, f_shift):
+    """A minimal ``{split}_pred.pckl.gzip``: per-atom energy error
+    ``e_shift`` and force-component error ``f_shift`` everywhere."""
+    pd = pytest.importorskip("pandas")
+    calcdir.mkdir(parents=True, exist_ok=True)
+    rng = np.random.default_rng(1)
+    forces = [rng.normal(size=(n, 3)) for n in n_atoms]
+    energies = [-3.0 * n for n in n_atoms]
+    pd.DataFrame(
+        {
+            "NUMBER_OF_ATOMS": n_atoms,
+            "energy_corrected": energies,
+            "energy_pred": [
+                e + e_shift * n for e, n in zip(energies, n_atoms)
+            ],
+            "forces": forces,
+            "forces_pred": [f + f_shift for f in forces],
+        }
+    ).to_pickle(calcdir / f"{split}_pred.pckl.gzip", compression="gzip")
+
+
+def test_training_parity_panel_per_member(tmp_path):
+    calcdirs = [tmp_path / "calcdirs" / str(i) for i in range(3)]
+    _write_pacemaker_preds(calcdirs[0], "test", [2, 4], 0.01, 0.1)
+    _write_pacemaker_preds(calcdirs[1], "test", [3], 0.03, 0.2)
+    # Member 2: no test split written -> skipped, not an error.
+    _write_pacemaker_preds(calcdirs[2], "train", [3], 0.0, 0.0)
+
+    panel = TrainingParityPanel(calcdirs, split="test", datapath=tmp_path)
+    _render(panel)
+
+    d = panel.data
+    assert sorted(d.e_obs) == ["0", "1"]
+    assert len(d.e_obs["0"]) == 2
+    assert d.e_obs["0"] == pytest.approx([-3.0, -3.0])  # per atom
+    assert d.e_rmse["0"] == pytest.approx(0.01)
+    assert d.f_rmse["1"] == pytest.approx(0.2)
+    assert len(d.f_obs["0"]) == (2 + 4) * 3
+    for ax in (panel.ax_e, panel.ax_f):
+        assert all(c.get_rasterized() for c in ax.collections)
+
+
+def test_training_parity_panel_subsamples_forces_not_metrics(tmp_path):
+    calcdir = tmp_path / "calcdirs" / "0"
+    _write_pacemaker_preds(calcdir, "train", [10, 10], 0.0, 0.5)
+
+    panel = TrainingParityPanel(
+        [calcdir], max_force_points=7, datapath=tmp_path
+    )
+    _render(panel)
+
+    assert len(panel.data.f_obs["0"]) == 7
+    assert len(panel.data.f_pred["0"]) == 7
+    assert panel.data.f_rmse["0"] == pytest.approx(0.5)
+    assert panel.data.f_mae["0"] == pytest.approx(0.5)
+
+
+def test_training_parity_panel_no_predictions_raises(tmp_path):
+    panel = TrainingParityPanel(
+        [tmp_path / "calcdirs" / "0"], split="test", datapath=tmp_path
     )
     with pytest.raises(ValueError):
         panel.compute_data({})

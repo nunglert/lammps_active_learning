@@ -48,10 +48,16 @@ class RunContext:
     annealed_configs: Optional[Path] = None
     sampler_log: Optional[Path] = None
     annealer_logs: list = field(default_factory=list)
+    uncertainty_trajectory: Optional[Path] = None
+    # See run_layout.annealer_box_status / dft_calc_status.
+    annealer_boxes: list = field(default_factory=list)
+    dft_calcs: list = field(default_factory=list)
 
     # Campaign-summary view: ``{iteration: path}``, unfinished iterations
-    # absent.
+    # absent, and every iteration's own per-iteration context (for panels
+    # that compare iterations stage by stage).
     uncertainty_trajectories: dict = field(default_factory=dict)
+    iteration_contexts: list = field(default_factory=list)
 
     @property
     def is_summary(self) -> bool:
@@ -101,21 +107,36 @@ def iteration_context(calchome, progress, it: int, species) -> RunContext:
         annealed_configs=run_layout.annealed_configs(calchome, progress, it),
         sampler_log=run_layout.sampler_lmp_log(calchome, it),
         annealer_logs=run_layout.annealer_lmp_logs_for_iteration(calchome, it),
+        uncertainty_trajectory=run_layout.sampler_uncertainty_trajectory(
+            calchome, progress, it
+        ),
+        annealer_boxes=run_layout.annealer_box_status(calchome, it),
+        dft_calcs=run_layout.dft_calc_status(calchome, it),
     )
 
 
-def campaign_context(calchome, progress, iterations, species) -> RunContext:
-    """Resolve everything the campaign-summary page can show."""
+def campaign_context(
+    calchome, progress, iterations, species, *, iteration_contexts=None
+) -> RunContext:
+    """Resolve everything the campaign-summary page can show.
+
+    ``iteration_contexts`` reuses already-resolved per-iteration contexts
+    (the CLI builds them for the iteration pages anyway); resolved here
+    otherwise.
+    """
     calchome = Path(calchome)
-    trajectories = {}
-    for it in iterations:
-        path = run_layout.sampler_uncertainty_trajectory(
-            calchome, progress, it
-        )
-        if path is not None:
-            trajectories[it] = path
+    if iteration_contexts is None:
+        iteration_contexts = [
+            iteration_context(calchome, progress, it, species)
+            for it in iterations
+        ]
     return RunContext(
         calchome=calchome,
         species=list(species),
-        uncertainty_trajectories=trajectories,
+        uncertainty_trajectories={
+            c.iteration: c.uncertainty_trajectory
+            for c in iteration_contexts
+            if c.uncertainty_trajectory is not None
+        },
+        iteration_contexts=list(iteration_contexts),
     )

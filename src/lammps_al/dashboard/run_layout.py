@@ -77,6 +77,17 @@ _SAMPLE_LMP_LOG = Path("sample") / "results" / "out" / "lmp.log"
 # (see annealer.py's results_dir_for) regardless of how many times a given
 # iteration's anneal was resubmitted.
 _ANNEAL_ARRAY_CALCDIRS = Path("anneal") / "array" / "calcdirs"
+# A box whose anneal completed writes its final structure here; one that
+# crashed (e.g. a LAMMPS ERROR mid-run) has an lmp.log but no samples file,
+# and is dropped from annealer_output.
+_ANNEAL_BOX_SAMPLES = Path("out") / "samples.extxyz"
+_ANNEAL_BOX_LOG = Path("out") / "lmp.log"
+
+# VASP evaluator array calcdirs, confirmed on disk:
+# calchome/{it}/dft/results/calcdirs/{i}, each marked finished by the
+# array task's own is_finished.info sentinel.
+_DFT_CALCDIRS = Path("dft") / "results" / "calcdirs"
+_FINISHED_SENTINEL = "is_finished.info"
 
 # Trainer calcdir layout, confirmed against remote_handler's
 # DetachableTaskMixin/_EnsembleArrayTrainer (_iteration_subdir="train",
@@ -311,6 +322,18 @@ def sampler_lmp_log(calchome, it: int):
     return p
 
 
+def _numeric_subdirs(base) -> list:
+    """``base``'s numerically-named subdirs, sorted numerically (an array
+    task's ``calcdirs/<i>`` convention), or ``[]`` if ``base`` is absent."""
+    if not base.exists():
+        logger.debug("No calcdirs at %s.", base)
+        return []
+    return sorted(
+        (p for p in base.iterdir() if p.is_dir() and p.name.isdigit()),
+        key=lambda p: int(p.name),
+    )
+
+
 def annealer_lmp_logs_for_iteration(calchome, it: int) -> list:
     """This iteration's per-box annealer LAMMPS logs.
 
@@ -322,24 +345,51 @@ def annealer_lmp_logs_for_iteration(calchome, it: int) -> list:
     within this iteration's array, i.e. manifest position, not the box's own
     ``index`` field -- see ``EmbeddingAnnealer._build_array_task``).
     """
-    base = Path(calchome) / str(it) / _ANNEAL_ARRAY_CALCDIRS
-    if not base.exists():
-        logger.debug("No annealer array calcdirs at %s.", base)
-        return []
-    calcdirs = sorted(
-        (p for p in base.iterdir() if p.is_dir() and p.name.isdigit()),
-        key=lambda p: int(p.name),
+    calcdirs = _numeric_subdirs(
+        Path(calchome) / str(it) / _ANNEAL_ARRAY_CALCDIRS
     )
-    logs = [c / "out" / "lmp.log" for c in calcdirs]
+    logs = [c / _ANNEAL_BOX_LOG for c in calcdirs]
     logs = [p for p in logs if p.exists()]
     logger.debug(
-        "iteration %d: %d/%d box(es) have an annealer LAMMPS log at %s.",
+        "iteration %d: %d/%d box(es) have an annealer LAMMPS log.",
         it,
         len(logs),
         len(calcdirs),
-        base,
     )
     return logs
+
+
+def annealer_box_status(calchome, it: int) -> list:
+    """Per-box anneal outcome: ``[(box, finished, log_path_or_None), ...]``.
+
+    ``box`` is the calcdir name (array position); ``finished`` whether the
+    box wrote its final structure (see ``_ANNEAL_BOX_SAMPLES``). ``[]`` if
+    the iteration's anneal never launched.
+    """
+    out = []
+    for c in _numeric_subdirs(
+        Path(calchome) / str(it) / _ANNEAL_ARRAY_CALCDIRS
+    ):
+        log = c / _ANNEAL_BOX_LOG
+        out.append(
+            (
+                c.name,
+                (c / _ANNEAL_BOX_SAMPLES).exists(),
+                log if log.exists() else None,
+            )
+        )
+    return out
+
+
+def dft_calc_status(calchome, it: int) -> list:
+    """Per-calcdir DFT outcome: ``[(calcdir_name, finished), ...]``.
+
+    ``[]`` if the iteration's evaluator never launched.
+    """
+    return [
+        (c.name, (c / _FINISHED_SENTINEL).exists())
+        for c in _numeric_subdirs(Path(calchome) / str(it) / _DFT_CALCDIRS)
+    ]
 
 
 def trainer_calcdirs_for_iteration(calchome, it: int) -> list:
@@ -353,13 +403,7 @@ def trainer_calcdirs_for_iteration(calchome, it: int) -> list:
     index), matching ``ArrayScriptTask``'s own ``calcdirs/<i>`` convention.
     """
     base = Path(calchome) / str(it) / _TRAIN_DIRNAME / "results" / "calcdirs"
-    if not base.exists():
-        logger.debug("No trainer calcdirs at %s.", base)
-        return []
-    dirs = sorted(
-        (p for p in base.iterdir() if p.is_dir() and p.name.isdigit()),
-        key=lambda p: int(p.name),
-    )
+    dirs = _numeric_subdirs(base)
     logger.debug(
         "iteration %d: %d trainer calcdir(s) at %s.", it, len(dirs), base
     )

@@ -43,6 +43,7 @@ def default_specs() -> list:
         make_spec("committee_parity"),
         make_spec("species_force_parity"),
         make_spec("training_convergence"),
+        make_spec("training_parity"),
         make_spec("roi_spatial"),
         make_spec("box_composition"),
         make_spec("box_rdf"),
@@ -50,8 +51,12 @@ def default_specs() -> list:
         # this instance (a bare `box_rdf` drops both).
         make_spec("box_rdf", source="post_anneal", name="box_rdf_post_anneal"),
         make_spec("sampler_thermo"),
+        make_spec("uncertainty_timeline"),
         make_spec("annealer_thermo"),
         make_spec("held_out_parity"),
+        make_spec("uncertainty_calibration"),
+        make_spec("error_vs_roi_distance"),
+        make_spec("pipeline_attrition"),
         make_spec("uncertainty_trend"),
         make_spec("uncertainty_depth_profile"),
     ]

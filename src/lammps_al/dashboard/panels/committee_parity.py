@@ -90,6 +90,20 @@ def _new_frames(current, previous) -> list:
     return current
 
 
+def rasterized_plot_kwargs(plot_kwargs: dict = None) -> dict:
+    """``ParityPanel`` ``plot_kwargs`` with the scatter points rasterized.
+
+    Force parity runs to 1e5-1e6 points, which as vector markers bloat the
+    PDF and make it crawl in a viewer; axes/labels stay vector. An explicit
+    ``rasterized`` in ``plot_kwargs`` wins.
+    """
+    plot_kwargs = plot_kwargs or {}
+    return {
+        axis: {"rasterized": True, **plot_kwargs.get(axis, {})}
+        for axis in ("energy", "forces")
+    }
+
+
 def _parity_data_from_configs(
     atoms_list, model_files, *, per_atom: bool = True, show_forces: bool = True
 ) -> ParityData:
@@ -165,7 +179,10 @@ class CommitteeParityPanel(ParityPanel):
         **kwargs,
     ):
         super().__init__(
-            *args, show_forces=show_forces, plot_kwargs=plot_kwargs, **kwargs
+            *args,
+            show_forces=show_forces,
+            plot_kwargs=rasterized_plot_kwargs(plot_kwargs),
+            **kwargs,
         )
         self._config_files = [Path(p) for p in config_files]
         self._model_files = [Path(p) for p in model_files]
@@ -218,7 +235,10 @@ class HeldOutParityPanel(ParityPanel):
         **kwargs,
     ):
         super().__init__(
-            *args, show_forces=show_forces, plot_kwargs=plot_kwargs, **kwargs
+            *args,
+            show_forces=show_forces,
+            plot_kwargs=rasterized_plot_kwargs(plot_kwargs),
+            **kwargs,
         )
         self._config_files = [Path(p) for p in config_files]
         self._previous_config_files = [Path(p) for p in previous_config_files]

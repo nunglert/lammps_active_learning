@@ -152,3 +152,40 @@ def test_iteration_dirs(tmp_path):
 
 def test_iteration_dirs_missing_calchome(tmp_path):
     assert run_layout.iteration_dirs(tmp_path / "does_not_exist") == []
+
+
+# ---------------------------------------------------------------------------
+# Anneal-box / DFT-calcdir status
+# ---------------------------------------------------------------------------
+def test_annealer_box_status(tmp_path):
+    base = tmp_path / "1" / "anneal" / "array" / "calcdirs"
+    for box in ("0", "1", "2"):
+        (base / box / "out").mkdir(parents=True)
+    (base / "0" / "out" / "lmp.log").write_text("ok")
+    (base / "0" / "out" / "samples.extxyz").write_text("")
+    (base / "1" / "out" / "lmp.log").write_text("ERROR: boom")
+
+    status = run_layout.annealer_box_status(tmp_path, 1)
+
+    assert status == [
+        ("0", True, base / "0" / "out" / "lmp.log"),
+        ("1", False, base / "1" / "out" / "lmp.log"),
+        ("2", False, None),
+    ]
+    assert run_layout.annealer_box_status(tmp_path, 2) == []
+
+
+def test_dft_calc_status(tmp_path):
+    base = tmp_path / "1" / "dft" / "results" / "calcdirs"
+    for calc in ("0", "1", "10"):
+        (base / calc).mkdir(parents=True)
+    (base / "0" / "is_finished.info").write_text("")
+    (base / "10" / "is_finished.info").write_text("")
+
+    # Numeric (not lexicographic) order.
+    assert run_layout.dft_calc_status(tmp_path, 1) == [
+        ("0", True),
+        ("1", False),
+        ("10", True),
+    ]
+    assert run_layout.dft_calc_status(tmp_path, 0) == []

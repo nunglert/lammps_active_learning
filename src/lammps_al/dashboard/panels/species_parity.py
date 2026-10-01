@@ -115,6 +115,7 @@ class SpeciesForceParityPanel(Entry):
                 xlabel="reference F (eV/Å)",
                 ylabel="predicted F (eV/Å)",
                 title=sym,
+                rasterized=True,
             )
 
 

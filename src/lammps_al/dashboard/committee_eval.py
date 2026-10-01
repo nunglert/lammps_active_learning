@@ -1,9 +1,12 @@
 """Score a trained ACE committee on reference configurations.
 
-pacemaker produces no portable prediction bundle (only the ``.yaml``
-potential per committee member), so parity data must come from *re-scoring*
-reference configs with the trained committee, not from reading a
-pre-computed bundle. ``pyace.PyACEEnsembleCalculator`` already does exactly
+The trainer output the AL loop records is only the ``.yaml`` potential per
+committee member, so parity of the *committee* on arbitrary configs must
+come from *re-scoring* them, not from reading a pre-computed bundle.
+(pacemaker does leave each member's own final-fit predictions on its own
+train/test split in the member's calcdir -- see
+:func:`read_pacemaker_predictions` -- but those are per member and fixed to
+that member's split.) ``pyace.PyACEEnsembleCalculator`` already does exactly
 this, and ``lammps_al``'s own committee-selection payload already builds one
 via ``_build_committee_calculator`` for uncertainty scoring -- this module
 reuses that directly rather than inventing a second pyace-loading path.
@@ -87,6 +90,40 @@ def read_pacemaker_metrics(calcdir, *, split: str = "train"):
     return df
 
 
+def read_pacemaker_predictions(calcdir, *, split: str = "train"):
+    """A single committee member's final-fit predictions on its own
+    train/test split, as pacemaker wrote them at the end of the fit -- no
+    re-scoring needed.
+
+    Energies are on pacemaker's ``energy_corrected`` scale (reference
+    energy minus the per-element reference-energy shift pacemaker fits
+    against), which is what ``energy_pred`` predicts; it differs from
+    ``REF_energy`` by a per-composition constant.
+
+    Args:
+        calcdir: One committee member's trainer calcdir (see
+            :func:`read_pacemaker_metrics`).
+        split: ``"train"`` or ``"test"`` (``{split}_pred.pckl.gzip``).
+
+    Returns:
+        A ``pandas.DataFrame``, one row per structure, with at least
+        ``NUMBER_OF_ATOMS``, ``energy_corrected``, ``energy_pred``,
+        ``forces`` and ``forces_pred`` (per-structure ``(n, 3)`` arrays).
+
+    Raises:
+        FileNotFoundError: If this calcdir has no such file (still running,
+            a failed fit, or no held-out split configured for ``"test"``).
+    """
+    import pandas as pd
+
+    path = Path(calcdir) / f"{split}_pred.pckl.gzip"
+    if not path.exists():
+        raise FileNotFoundError(f"No {path.name} in {calcdir}.")
+    df = pd.read_pickle(path, compression="gzip")
+    logger.debug("Read %d %s prediction(s) from %s.", len(df), split, path)
+    return df
+
+
 def score_with_committee(
     model_files,
     atoms_list,
@@ -137,3 +174,47 @@ def score_with_committee(
         elapsed / len(atoms_list) if atoms_list else 0.0,
     )
     return energies, forces
+
+
+def committee_force_spread(
+    model_files,
+    atoms_list,
+    *,
+    device: str = "cpu",
+    _build_calculator=_default_committee_calculator,
+):
+    """Committee mean forces *and* their per-atom spread for each config.
+
+    The spread is the ensemble calculator's own per-component force
+    standard deviation (``results["forces_std"]``) -- the same quantity
+    ``committee_selection`` aggregates into the sampler's ``uncertainty``
+    array, so it can be compared against actual force errors directly.
+
+    Args:
+        model_files / atoms_list / device / _build_calculator: As
+            :func:`score_with_committee`.
+
+    Returns:
+        ``(forces, forces_std)``: two lists of ``(n_atoms, 3)`` arrays.
+    """
+    model_files = [Path(p) for p in model_files]
+    calc = _build_calculator(model_files, device)
+    logger.info(
+        "Scoring %d configuration(s) with the committee (forces + spread).",
+        len(atoms_list),
+    )
+    start = time.monotonic()
+    forces, forces_std = [], []
+    for atoms in atoms_list:
+        scored = atoms.copy()
+        scored.calc = calc
+        forces.append(np.asarray(scored.get_forces(), dtype=float))
+        forces_std.append(
+            np.asarray(scored.calc.results["forces_std"], dtype=float)
+        )
+    logger.info(
+        "Scored %d configuration(s) in %.1fs.",
+        len(atoms_list),
+        time.monotonic() - start,
+    )
+    return forces, forces_std

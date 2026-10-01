@@ -6,6 +6,8 @@ layered with an optional YAML config -- ``--config``, else
 ``<calchome>/dashboard.yaml`` if present -- of the form::
 
     species: [Cu, H, O]          # any CLI flag, as a default (flags win)
+    ncols: 3                     # page grid: panels per row ...
+    width_per_panel: 5.0         # ... and inches per grid cell
     disable: [sampler_thermo]    # drop defaults by type or name
     add:                         # extra panels, rendered last
       - {type: box_rdf, source: post_anneal, name: rdf_long,
@@ -71,6 +73,9 @@ def build_dashboard_pdfs(
     only=None,
     exclude=None,
     panel_config=None,
+    ncols: int = 2,
+    width_per_panel: float = 4.0,
+    height_per_panel: float = 4.0,
 ) -> list:
     """Render one page per iteration with data + one campaign-summary page.
 
@@ -78,7 +83,9 @@ def build_dashboard_pdfs(
     ``alviz.pdf.merge_pdfs``). A page with no renderable entries is skipped
     entirely rather than emitted empty. ``panel_config`` is a parsed
     ``add``/``disable``/``panels`` layer (see
-    :func:`panel_specs.parse_panel_config`).
+    :func:`panel_specs.parse_panel_config`). ``ncols`` /
+    ``width_per_panel`` / ``height_per_panel`` size every page's grid (a
+    panel's own ``colspan`` is clamped to ``ncols``).
     """
     calchome = Path(calchome)
     out_dir = Path(out_dir)
@@ -98,7 +105,13 @@ def build_dashboard_pdfs(
         for it in range(n_iterations)
     ]
     contexts.append(
-        campaign_context(calchome, progress, range(n_iterations), species)
+        campaign_context(
+            calchome,
+            progress,
+            range(n_iterations),
+            species,
+            iteration_contexts=contexts,
+        )
     )
 
     pages = []
@@ -116,7 +129,14 @@ def build_dashboard_pdfs(
                 ctx.page_label,
             )
             continue
-        board = Dashboard.from_entries(entries, only=only, exclude=exclude)
+        board = Dashboard.from_entries(
+            entries,
+            ncols=ncols,
+            width_per_panel=width_per_panel,
+            height_per_panel=height_per_panel,
+            only=only,
+            exclude=exclude,
+        )
         board.render(suptitle=ctx.page_label)
         if not _any_entry_has_data(board, page_label=ctx.page_label):
             logger.info(
@@ -218,6 +238,24 @@ def main(argv=None) -> int:
         "--exclude", nargs="+", default=None, help="Skip these panels"
     )
     parser.add_argument(
+        "--ncols",
+        type=int,
+        default=2,
+        help="Grid columns per page (wide panels span 2 of them)",
+    )
+    parser.add_argument(
+        "--width-per-panel",
+        type=float,
+        default=4.0,
+        help="Width of one grid cell, in inches",
+    )
+    parser.add_argument(
+        "--height-per-panel",
+        type=float,
+        default=4.0,
+        help="Height of one grid cell, in inches",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -244,6 +282,11 @@ def main(argv=None) -> int:
     panel_config = parse_panel_config(panel_raw)
 
     load_rc_params()
+    # Resolution of rasterized artists (the parity scatter points) inside
+    # the otherwise-vector PDF; matplotlib's default is the figure's 100.
+    import matplotlib as mpl
+
+    mpl.rcParams["savefig.dpi"] = 200
     calchome = Path(args.calchome)
     out_dir = calchome / "dashboard_data"
     pages = build_dashboard_pdfs(
@@ -253,6 +296,9 @@ def main(argv=None) -> int:
         only=args.only,
         exclude=args.exclude,
         panel_config=panel_config,
+        ncols=args.ncols,
+        width_per_panel=args.width_per_panel,
+        height_per_panel=args.height_per_panel,
     )
     if not pages:
         logger.warning("No dashboard pages produced (no finished iterations?)")

@@ -1,15 +1,21 @@
 """Committee-disagreement (uncertainty) diagnostics across AL iterations.
 
-Both panels read ``uncertainty_select_output`` (see
+All panels read ``uncertainty_select_output`` (see
 ``run_layout.sampler_uncertainty_trajectory``) --
 ``CommitteeUncertaintySelector`` annotates without reducing, so this is the
 full per-atom committee-disagreement signal for every frame the sampler
 produced;
-``sampler_output/`` itself holds the raw, un-annotated MD trajectory.
+``sampler_output/`` itself holds the raw, un-annotated MD trajectory. These
+are full-system dumps (GBs per iteration), so every panel streams only the
+columns it needs via :mod:`~lammps_al.dashboard.extxyz_columns` rather
+than parsing whole ``Atoms`` with ``ase.io``.
 """
 
 from __future__ import annotations
 
+import json
+import logging
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -18,6 +24,9 @@ from alviz.dashboard import Entry
 from alviz.data import PanelData
 
 from lammps_al.dashboard.context import named
+from lammps_al.dashboard.extxyz_columns import iter_columns
+
+logger = logging.getLogger(__name__)
 
 
 class UncertaintyTrendData(PanelData):
@@ -67,16 +76,15 @@ class UncertaintyTrendPanel(Entry):
         self.ax = fig.add_subplot(self.subspec)
 
     def compute_data(self, shared_ressources: dict) -> UncertaintyTrendData:
-        import ase.io
-
         iterations, means, lows, highs = [], [], [], []
         for it, traj_path in self._trajectories.items():
-            values = []
-            for atoms in ase.io.read(traj_path, index=":"):
-                values.extend(np.asarray(atoms.arrays["uncertainty"]).ravel())
-            if not values:
+            frames = [
+                a["uncertainty"]
+                for _, a in iter_columns(traj_path, ["uncertainty"])
+            ]
+            if not frames:
                 continue
-            values = np.asarray(values, dtype=float)
+            values = np.concatenate(frames).astype(float)
             iterations.append(it)
             means.append(float(values.mean()))
             lows.append(float(np.percentile(values, self._low_pct)))
@@ -169,44 +177,39 @@ class UncertaintyDepthProfilePanel(Entry):
     def compute_data(
         self, shared_ressources: dict
     ) -> UncertaintyDepthProfileData:
-        import ase.io
-
         edges = self._bin_edges()
         centers = ((edges[:-1] + edges[1:]) / 2).tolist()
+        n_bins = len(centers)
+        interface = list(self._interface_species)
 
         profiles: dict = {}
         used_iterations = []
         for it, traj_path in self._trajectories.items():
-            depths_all, unc_all = [], []
-            for atoms in ase.io.read(traj_path, index=":"):
-                symbols = np.asarray(atoms.get_chemical_symbols())
-                z = atoms.positions[:, 2]
-                interface_mask = np.isin(
-                    symbols, list(self._interface_species)
-                )
+            # Running per-bin sums/counts: nothing per-atom is kept across
+            # frames.
+            sums = np.zeros(n_bins)
+            counts = np.zeros(n_bins)
+            for _, a in iter_columns(
+                traj_path, ["species", ("pos", 2), "uncertainty"]
+            ):
+                z = a[("pos", 2)].astype(float)
+                interface_mask = np.isin(a["species"], interface)
                 if not interface_mask.any():
                     continue
-                z0 = z[interface_mask].mean()
-                depths_all.extend((z - z0).tolist())
-                unc_all.extend(
-                    np.asarray(atoms.arrays["uncertainty"]).ravel().tolist()
+                bin_idx = np.digitize(z - z[interface_mask].mean(), edges) - 1
+                inside = (bin_idx >= 0) & (bin_idx < n_bins)
+                sums += np.bincount(
+                    bin_idx[inside],
+                    weights=a["uncertainty"][inside].astype(float),
+                    minlength=n_bins,
                 )
+                counts += np.bincount(bin_idx[inside], minlength=n_bins)
 
-            if not depths_all:
+            if not counts.any():
                 continue
-
-            depths_arr = np.asarray(depths_all)
-            unc_arr = np.asarray(unc_all)
-            bin_idx = np.digitize(depths_arr, edges) - 1
-
-            means: list = []
-            for b in range(len(centers)):
-                mask = bin_idx == b
-                means.append(
-                    float(unc_arr[mask].mean()) if mask.any() else None
-                )
-
-            profiles[str(it)] = means
+            profiles[str(it)] = [
+                float(s / c) if c else None for s, c in zip(sums, counts)
+            ]
             used_iterations.append(it)
 
         if not used_iterations:
@@ -282,4 +285,160 @@ register_panel(
     "uncertainty_depth_profile",
     UncertaintyDepthProfileSpec,
     _build_uncertainty_depth_profile,
+)
+
+
+class UncertaintyTimelineData(PanelData):
+    """Per-frame uncertainty summary along one sampler trajectory, plus the
+    uncertainty of every extracted ROI's center atom."""
+
+    step: list[float]
+    mean: list[float]
+    high: list[float]
+    max: list[float]
+    roi_step: list[float]
+    roi_uncertainty: list[float]
+
+
+class UncertaintyTimelinePanel(Entry):
+    """Per-frame mean / high-percentile / max uncertainty vs. MD step, with
+    the extracted ROIs marked at their source frame.
+
+    Answers two things the campaign-level trend can't: whether the sampler
+    drifts into unknown territory as the run goes on (a steadily rising max
+    is a precursor to a blow-up, and argues for shorter MD), and how extreme
+    the chosen ROIs are -- each ROI's center-atom uncertainty sits on the
+    same axis as the per-frame max/percentile it was picked against.
+
+    Streams only the ``uncertainty`` column, one frame at a time.
+
+    Args:
+        trajectory_path: The iteration's recorded uncertainty-annotated
+            sampler trajectory.
+        manifest_path: The iteration's ``selector_output`` manifest (its
+            ``frame``/``roi_index`` fields locate each ROI's center atom), or
+            ``None`` to plot without ROI markers.
+        high_pct: The upper percentile line.
+        log_y: Log-scale the uncertainty axis (max and mean typically differ
+            by orders of magnitude).
+    """
+
+    name = "uncertainty_timeline"
+    data_class = UncertaintyTimelineData
+    colspan = 2
+
+    def __init__(
+        self,
+        trajectory_path,
+        *args,
+        manifest_path=None,
+        high_pct: float = 99,
+        log_y: bool = True,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self._trajectory_path = Path(trajectory_path)
+        self._manifest_path = (
+            Path(manifest_path) if manifest_path is not None else None
+        )
+        self._high_pct = high_pct
+        self._log_y = log_y
+
+    def allocate_panels(self, fig):
+        self._fig = fig
+        self.ax = fig.add_subplot(self.subspec)
+
+    def compute_data(self, shared_ressources: dict) -> UncertaintyTimelineData:
+        rois_by_frame: dict = {}
+        if self._manifest_path is not None:
+            for entry in json.loads(self._manifest_path.read_text()):
+                if "frame" in entry and "roi_index" in entry:
+                    rois_by_frame.setdefault(entry["frame"], []).append(
+                        entry["roi_index"]
+                    )
+
+        step, mean, high, mx = [], [], [], []
+        roi_step, roi_unc = [], []
+        for i, (info, a) in enumerate(
+            iter_columns(
+                self._trajectory_path,
+                ["uncertainty"],
+                info_keys=("timestep",),
+            )
+        ):
+            u = a["uncertainty"].astype(float)
+            s = float(info.get("timestep", i))
+            step.append(s)
+            mean.append(float(u.mean()))
+            high.append(float(np.percentile(u, self._high_pct)))
+            mx.append(float(u.max()))
+            for roi_index in rois_by_frame.get(i, []):
+                roi_step.append(s)
+                roi_unc.append(float(u[roi_index]))
+
+        if not step:
+            raise ValueError(f"No frames in {self._trajectory_path}.")
+        logger.info(
+            "%d frame(s), %d ROI(s) located, from %s.",
+            len(step),
+            len(roi_step),
+            self._trajectory_path,
+        )
+        return UncertaintyTimelineData(
+            step=step,
+            mean=mean,
+            high=high,
+            max=mx,
+            roi_step=roi_step,
+            roi_uncertainty=roi_unc,
+        )
+
+    def plot_data(self):
+        d = self.data
+        self.ax.plot(d.step, d.max, lw=1, label="max")
+        self.ax.plot(d.step, d.high, lw=1, label=f"p{self._high_pct:g}")
+        self.ax.plot(d.step, d.mean, lw=1, label="mean")
+        if d.roi_step:
+            self.ax.scatter(
+                d.roi_step,
+                d.roi_uncertainty,
+                s=40,
+                marker="x",
+                color="k",
+                zorder=3,
+                label=f"ROI centers ({len(d.roi_step)})",
+            )
+        if self._log_y:
+            self.ax.set_yscale("log")
+        self.ax.set_xlabel("MD step")
+        self.ax.set_ylabel("per-atom uncertainty")
+        self.ax.legend(fontsize="small")
+        self.ax.set_title(self.name)
+
+
+class UncertaintyTimelineSpec(PanelSpec):
+    type: str = "uncertainty_timeline"
+    high_pct: float = 99
+    log_y: bool = True
+
+
+def _build_uncertainty_timeline(spec, ctx, common):
+    if ctx.is_summary:
+        return None
+    if ctx.uncertainty_trajectory is None:
+        return ctx.skip(spec.type, "no uncertainty trajectory recorded")
+    return UncertaintyTimelinePanel(
+        ctx.uncertainty_trajectory,
+        manifest_path=ctx.selector_manifest,
+        high_pct=spec.high_pct,
+        log_y=spec.log_y,
+        **named(spec),
+        **common,
+    )
+
+
+register_panel(
+    "uncertainty_timeline",
+    UncertaintyTimelineSpec,
+    _build_uncertainty_timeline,
 )
