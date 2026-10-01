@@ -187,10 +187,11 @@ def _apply_config(parser, argv, args):
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
+        prog="lammps-al dashboard",
         description=(
             "Build a parity/uncertainty dashboard PDF for an ACE-committee "
             "active-learning campaign."
-        )
+        ),
     )
     parser.add_argument("calchome", help="Path to the campaign's calchome dir")
     parser.add_argument(

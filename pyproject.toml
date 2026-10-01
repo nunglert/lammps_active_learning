@@ -86,6 +86,9 @@ all = [
     "lammps_active_learning[dev,run,ace,grace,mace,embedding,dashboard]"
 ]
 
+[project.scripts]
+lammps-al = "lammps_al.__main__:main"
+
 [tool.setuptools_scm]
 # Single source of truth for the version is the git tag (mirrors jaxrens_al).
 # No version file is written; the runtime reads it via importlib.metadata.
