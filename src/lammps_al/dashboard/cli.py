@@ -1,11 +1,21 @@
 """CLI: build a multipage dashboard PDF for one AL campaign's ``calchome``.
 
-Deliberately no panel registry or config-file layer (unlike jaxrens_al's
-``jaxrens-al`` CLI, which spans many trainer/sampler backends across a
-maintained multi-user tool) -- this is one campaign, one committee family,
-single user. A per-campaign wrapper is just a thin script calling
-:func:`main` with that campaign's ``calchome`` and species list (campaign
-working directories are gitignored, not shipped with this repo).
+One page per iteration with data plus one campaign-summary page. Which
+panels appear is spec-driven (:mod:`panel_specs`): a curated default list,
+layered with an optional YAML config -- ``--config``, else
+``<calchome>/dashboard.yaml`` if present -- of the form::
+
+    species: [Cu, H, O]          # any CLI flag, as a default (flags win)
+    disable: [sampler_thermo]    # drop defaults by type or name
+    add:                         # extra panels, rendered last
+      - {type: box_rdf, source: post_anneal, name: rdf_long,
+         pairs: [[O, O, 12.0]]}
+    # panels: [...]              # fully replaces the defaults instead
+
+Mirrors ``jaxrens_al``'s ``jaxrens-al dashboard`` config layer, minus its
+multiple dashboard flavors. A per-campaign wrapper is just a thin script
+calling :func:`main` with that campaign's ``calchome`` (campaign working
+directories are gitignored, not shipped with this repo).
 """
 
 from __future__ import annotations
@@ -19,156 +29,13 @@ from alviz.mpl_utils import load_rc_params
 from alviz.pdf import merge_pdfs
 
 from lammps_al.dashboard import run_layout
-from lammps_al.dashboard.panels.annealer_thermo import AnnealerThermoPanel
-from lammps_al.dashboard.panels.box_structure import (
-    BoxCompositionPanel,
-    BoxRDFPanel,
-)
-from lammps_al.dashboard.panels.committee_parity import (
-    CommitteeParityPanel,
-    HeldOutParityPanel,
-)
-from lammps_al.dashboard.panels.roi_spatial import ROISpatialPanel
-from lammps_al.dashboard.panels.sampler_thermo import SamplerThermoPanel
-from lammps_al.dashboard.panels.species_parity import SpeciesForceParityPanel
-from lammps_al.dashboard.panels.training_fit import TrainingConvergencePanel
-from lammps_al.dashboard.panels.uncertainty import (
-    UncertaintyDepthProfilePanel,
-    UncertaintyTrendPanel,
-)
+from lammps_al.dashboard.context import campaign_context, iteration_context
+from lammps_al.dashboard.panel_specs import assemble, parse_panel_config
 
 logger = logging.getLogger(__name__)
 
-
-def build_entries_for_iteration(
-    calchome, progress, it: int, species, *, datapath
-) -> list:
-    """The per-iteration panels: committee / held-out / species parity.
-
-    Returns an empty list when this iteration has no trained model or no
-    evaluated configs yet (nothing to plot).
-    """
-    trained = run_layout.trained_models_per_iteration(calchome, progress)
-    evaluated = run_layout.evaluated_configs_per_iteration(calchome, progress)
-
-    model_files = trained[it] if it < len(trained) else []
-    config_files = evaluated[it] if it < len(evaluated) else []
-
-    entries = []
-    if model_files and config_files:
-        entries.append(
-            CommitteeParityPanel(config_files, model_files, datapath=datapath)
-        )
-        entries.append(
-            SpeciesForceParityPanel(
-                config_files, model_files, species, datapath=datapath
-            )
-        )
-    else:
-        logger.info(
-            "iteration %d: skipping committee/species parity panels "
-            "(model_files=%d, config_files=%d).",
-            it,
-            len(model_files),
-            len(config_files),
-        )
-
-    if run_layout.trainer_calcdirs_for_iteration(calchome, it):
-        entries.append(
-            TrainingConvergencePanel(calchome, progress, it, datapath=datapath)
-        )
-    else:
-        logger.info(
-            "iteration %d: skipping training-convergence panel (no trainer "
-            "calcdirs found).",
-            it,
-        )
-
-    if run_layout.selector_output_manifest(calchome, progress, it):
-        entries.append(
-            ROISpatialPanel(calchome, progress, it, datapath=datapath)
-        )
-        entries.append(
-            BoxCompositionPanel(calchome, progress, it, datapath=datapath)
-        )
-        entries.append(BoxRDFPanel(calchome, progress, it, datapath=datapath))
-    else:
-        logger.info(
-            "iteration %d: skipping ROI spatial/box composition/box RDF "
-            "panels (no selector_output recorded).",
-            it,
-        )
-
-    if run_layout.annealed_configs(calchome, progress, it):
-        # Distinct `name=` from the pre-anneal instance above -- Entry.name
-        # doubles as its JSON cache filename, so two panels sharing one
-        # would silently clobber each other's cached data.
-        entries.append(
-            BoxRDFPanel(
-                calchome,
-                progress,
-                it,
-                source="post_anneal",
-                name="box_rdf_post_anneal",
-                datapath=datapath,
-            )
-        )
-    else:
-        logger.info(
-            "iteration %d: skipping post-anneal box RDF panel (no "
-            "annealer_output recorded).",
-            it,
-        )
-
-    if run_layout.sampler_lmp_log(calchome, it):
-        entries.append(SamplerThermoPanel(calchome, it, datapath=datapath))
-    else:
-        logger.info(
-            "iteration %d: skipping sampler thermo panel (no sampler "
-            "LAMMPS log found).",
-            it,
-        )
-
-    if run_layout.annealer_lmp_logs_for_iteration(calchome, it):
-        entries.append(AnnealerThermoPanel(calchome, it, datapath=datapath))
-    else:
-        logger.info(
-            "iteration %d: skipping annealer thermo panel (no annealer "
-            "LAMMPS logs found).",
-            it,
-        )
-
-    prev_models = trained[it - 1] if 0 <= it - 1 < len(trained) else []
-    if prev_models:
-        entries.append(
-            HeldOutParityPanel(
-                calchome, progress, it, prev_models, datapath=datapath
-            )
-        )
-    else:
-        logger.info(
-            "iteration %d: skipping held-out parity panel (no trained "
-            "model recorded for iteration %d).",
-            it,
-            it - 1,
-        )
-    return entries
-
-
-def build_campaign_entries(calchome, progress, *, datapath) -> list:
-    """The whole-campaign panels: uncertainty trend + depth profile."""
-    n_iterations = len(
-        run_layout.trained_models_per_iteration(calchome, progress)
-    )
-    iterations = list(range(n_iterations))
-    return [
-        UncertaintyTrendPanel(
-            calchome, progress, iterations, datapath=datapath
-        ),
-        UncertaintyDepthProfilePanel(
-            calchome, progress, iterations, datapath=datapath
-        ),
-    ]
+_CONFIG_NAMES = ("dashboard.yaml", "dashboard.yml")
+_PANEL_KEYS = ("add", "disable", "panels")
 
 
 def _any_entry_has_data(board: Dashboard, *, page_label: str) -> bool:
@@ -197,20 +64,27 @@ def _any_entry_has_data(board: Dashboard, *, page_label: str) -> bool:
 
 
 def build_dashboard_pdfs(
-    calchome, out_dir, species, *, only=None, exclude=None
+    calchome,
+    out_dir,
+    species,
+    *,
+    only=None,
+    exclude=None,
+    panel_config=None,
 ) -> list:
     """Render one page per iteration with data + one campaign-summary page.
 
     Returns the ordered list of per-page PDF paths (feed to
     ``alviz.pdf.merge_pdfs``). A page with no renderable entries is skipped
-    entirely rather than emitted empty.
+    entirely rather than emitted empty. ``panel_config`` is a parsed
+    ``add``/``disable``/``panels`` layer (see
+    :func:`panel_specs.parse_panel_config`).
     """
     calchome = Path(calchome)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     progress = run_layout.load_progress(calchome)
 
-    pages = []
     n_iterations = len(
         run_layout.trained_models_per_iteration(calchome, progress)
     )
@@ -219,47 +93,96 @@ def build_dashboard_pdfs(
         calchome,
         n_iterations,
     )
-    for it in range(n_iterations):
-        page_datapath = out_dir / f"iter_{it}"
+    contexts = [
+        iteration_context(calchome, progress, it, species)
+        for it in range(n_iterations)
+    ]
+    contexts.append(
+        campaign_context(calchome, progress, range(n_iterations), species)
+    )
+
+    pages = []
+    for ctx in contexts:
+        page_datapath = out_dir / (
+            "campaign" if ctx.is_summary else f"iter_{ctx.iteration}"
+        )
         page_datapath.mkdir(parents=True, exist_ok=True)
-        entries = build_entries_for_iteration(
-            calchome, progress, it, species, datapath=page_datapath
+        entries = assemble(
+            ctx, datapath=page_datapath, panel_config=panel_config
         )
         if not entries:
             logger.info(
-                "iteration %d: no panels built at all -- skipping page.", it
+                "%s: no panels built at all -- skipping page.",
+                ctx.page_label,
             )
             continue
         board = Dashboard.from_entries(entries, only=only, exclude=exclude)
-        board.render(suptitle=f"iteration {it}")
-        if not _any_entry_has_data(board, page_label=f"iteration {it}"):
+        board.render(suptitle=ctx.page_label)
+        if not _any_entry_has_data(board, page_label=ctx.page_label):
             logger.info(
-                "iteration %d: every panel failed to compute -- skipping "
-                "page (see per-panel errors above).",
-                it,
+                "%s: every panel failed to compute -- skipping page (see "
+                "per-panel errors above).",
+                ctx.page_label,
             )
             continue
         page_path = page_datapath / "page.pdf"
         board.savefig(page_path)
         pages.append(page_path)
 
-    campaign_datapath = out_dir / "campaign"
-    campaign_datapath.mkdir(parents=True, exist_ok=True)
-    campaign_entries = build_campaign_entries(
-        calchome, progress, datapath=campaign_datapath
-    )
-    if campaign_entries:
-        board = Dashboard.from_entries(
-            campaign_entries, only=only, exclude=exclude
-        )
-        board.render(suptitle="campaign summary")
-        if _any_entry_has_data(board, page_label="campaign summary"):
-            page_path = campaign_datapath / "page.pdf"
-            board.savefig(page_path)
-            pages.append(page_path)
-
     logger.info("Built %d dashboard page(s).", len(pages))
     return pages
+
+
+def load_config(path) -> dict:
+    """Read a YAML dashboard config (empty file -> ``{}``)."""
+    import yaml
+
+    data = yaml.safe_load(Path(path).read_text()) or {}
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"{path}: expected a mapping at the top level, got "
+            f"{type(data).__name__}."
+        )
+    return data
+
+
+def _apply_config(parser, argv, args):
+    """Fold a config file in as flag defaults; returns ``(args,
+    panel_config_raw, config_path)`` (the latter two ``None`` without a
+    config).
+
+    The config's flat keys become argparse defaults (so any CLI flag still
+    wins); its ``add``/``disable``/``panels`` keys are split off for
+    :func:`panel_specs.parse_panel_config`. An unknown flat key raises
+    rather than being silently ignored.
+    """
+    if args.config:
+        path = Path(args.config)
+        if not path.is_file():
+            raise FileNotFoundError(f"Config file not found: {path}")
+    else:
+        path = next(
+            (
+                Path(args.calchome) / n
+                for n in _CONFIG_NAMES
+                if (Path(args.calchome) / n).is_file()
+            ),
+            None,
+        )
+    if path is None:
+        return args, None, None
+
+    cfg = {str(k).replace("-", "_"): v for k, v in load_config(path).items()}
+    panel_raw = {k: cfg.pop(k, None) for k in _PANEL_KEYS}
+    valid = {a.dest for a in parser._actions} - {"help", "calchome", "config"}
+    unknown = sorted(set(cfg) - valid)
+    if unknown:
+        raise ValueError(
+            f"{path}: unknown config key(s) {unknown}; valid: "
+            f"{sorted(valid | set(_PANEL_KEYS))}."
+        )
+    parser.set_defaults(**cfg)
+    return parser.parse_args(argv), panel_raw, path
 
 
 def main(argv=None) -> int:
@@ -270,6 +193,14 @@ def main(argv=None) -> int:
         )
     )
     parser.add_argument("calchome", help="Path to the campaign's calchome dir")
+    parser.add_argument(
+        "--config",
+        default=None,
+        help=(
+            "YAML dashboard config (flag defaults + panel add/disable/"
+            "panels). Default: <calchome>/dashboard.yaml if present."
+        ),
+    )
     parser.add_argument(
         "--output", default="dashboard.pdf", help="Output PDF path"
     )
@@ -295,6 +226,8 @@ def main(argv=None) -> int:
         ),
     )
     args = parser.parse_args(argv)
+    # Before logging setup, so a config's `verbose: true` takes effect.
+    args, panel_raw, config_path = _apply_config(parser, argv, args)
 
     # No caller configures logging for this CLI otherwise -- without a
     # handler, Python's root logger only surfaces WARNING+ (its "handler of
@@ -305,12 +238,20 @@ def main(argv=None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(levelname)s %(name)s: %(message)s",
     )
+    if config_path is not None:
+        logger.info("Applied dashboard config %s.", config_path)
+    panel_config = parse_panel_config(panel_raw)
 
     load_rc_params()
     calchome = Path(args.calchome)
     out_dir = calchome / "dashboard_data"
     pages = build_dashboard_pdfs(
-        calchome, out_dir, args.species, only=args.only, exclude=args.exclude
+        calchome,
+        out_dir,
+        args.species,
+        only=args.only,
+        exclude=args.exclude,
+        panel_config=panel_config,
     )
     if not pages:
         logger.warning("No dashboard pages produced (no finished iterations?)")

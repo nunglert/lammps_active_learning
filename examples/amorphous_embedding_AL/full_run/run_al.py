@@ -1,5 +1,20 @@
 """Active-learning workflow: rough Cu-water interfaces, ACE committee.
 
+Forked from ``experiments/rough_cu_water_al`` (2026-09-25) with four
+parameter changes, informed by that campaign's own results/dashboard:
+sampler MD length 2000 -> 20000 steps (``config/templates/
+lammps_ace.in.template``, ``lammps_sampler.dump_frequency`` scaled to
+match), ``roi_extractor.max_num_structures`` 100 -> 10, ``vasp_evaluator.
+num_parallel`` 1 -> 3, and the annealer's water stage (``embedding_
+annealer.anneal_stages[1]["run_steps"]``) 25000 -> 50000 steps (real
+per-box thermo from rough_cu_water_al's completed anneal showed this
+stage starting from a genuine ~500-540K thermal transient at the stage
+handoff, leaving little post-transient time at its own 25000-step budget
+even though it did fully settle by the end -- see that setting's own
+comment). Everything else (cluster assignment, INCAR settings, etc.) is
+unchanged -- see each setting's own comment below for why the *original*
+value was chosen; only the values noted here changed.
+
 Skeleton for the campaign described in
 ``/cellar/nunglert/projects/remote_handler/lammps/PLAN.md``: reproduce
 erhard2026's amorphous-matrix-embedding AL workflow (rough Cu(100/110/111)
@@ -187,12 +202,12 @@ masses = [63.546, 1.008, 15.999]
 # and pacemaker's tensorpot backend needs a GPU for the trainer (see module
 # docstring). The annealer (geometry/small-box work, no real GPU benefit)
 # stays on the plain CPU partition above.
-# musica_gpu_fs = RemoteFileSystem(
-#     remote_alias="musica", local_temp_path=_tmpdir
-# )
-# musica_gpu_cluster = ClusterConfig.from_file(
-#     str(config_dir / "templates" / "musica_gpu.json")
-# )
+musica_gpu_fs = RemoteFileSystem(
+    remote_alias="musica", local_temp_path=_tmpdir
+)
+musica_gpu_cluster = ClusterConfig.from_file(
+    str(config_dir / "templates" / "musica_gpu.json")
+)
 
 datalab_gpu_fs = RemoteFileSystem(
     remote_alias="datalab", local_temp_path=_tmpdir
@@ -243,8 +258,8 @@ lugus_cluster = ClusterConfig.from_file(
 # 1. Sampler: LammpsSampler (ACE committee-uncertainty MD)
 # ---------------------------------------------------------------------------
 lammps_sampler = LammpsSampler(
-    remote_fs=datalab_gpu_fs,
-    cluster_config=datalab_gpu_cluster,
+    remote_fs=musica_gpu_fs,
+    cluster_config=musica_gpu_cluster,
     template_path=config_dir / "templates" / "lammps_ace.in.template",
     # Frame 0 of RoughSurfaces/RoughSurfaces/Cu_Water_equilibrated.xyz (46
     # distinct rough surfaces) -- the smallest by atom count (206941;
@@ -253,14 +268,18 @@ lammps_sampler = LammpsSampler(
     # preserved from the equilibrated trajectory's momenta.
     data_path=calchome / "inputs" / "surface_0.data",
     element_mapping={1: "Cu", 2: "H", 3: "O"},
-    # Steps between dumped frames (template's fixed "run 2000" / 4 uncertainty
+    # Steps between dumped frames (template's "run 20000" / 4 uncertainty
     # bins downstream -> 100 total frames, 25/bin -- plenty of resolution to
-    # find each bin's peak-uncertainty frame). Previously collided with a
-    # different, pre-existing field name (sampling_frequency) and got
-    # silently dropped -- confirmed as the cause of a >20GB dump file in
-    # ~10 minutes on this 206941-atom system, 2026-09-11. See
-    # LammpsSampler.dump_frequency's docstring.
-    dump_frequency=20,
+    # find each bin's peak-uncertainty frame). Scaled up 10x from
+    # rough_cu_water_al's dump_frequency=20 to match this run's 10x longer
+    # "run" in the template, so frame count -- and downstream committee-
+    # scoring cost -- stays the same even though simulated time didn't.
+    # Previously (rough_cu_water_al, pre-scaling) collided with a different,
+    # pre-existing field name (sampling_frequency) and got silently dropped
+    # -- confirmed as the cause of a >20GB dump file in ~10 minutes on this
+    # 206941-atom system, 2026-09-11. See LammpsSampler.dump_frequency's
+    # docstring.
+    dump_frequency=200,
     backend="ace",
     # "pace product" (not "pace/kk"): the template's pair_style line is
     # rendered verbatim from this string, and LAMMPS's `-sf kk` suffix flag
@@ -281,6 +300,8 @@ lammps_sampler = LammpsSampler(
     # mliap route) but "g 1" here maps to datalab_gpu's --gres=gpu:1.
     lammps_args="-k on g 1 -sf kk -pk kokkos newton on neigh half",
     remote_lammps_executable_path=(
+        # datalab's own Kokkos-CUDA + ML-PACE build (AMPERE80), from
+        # rough_cu_water_al/build/build_lammps_pace_kokkos_datalab.sh.
         "/data/fs201236/nu90319/software/lammps-pace-kokkos/src/build/lmp"
     ),
     stub=STUB,
@@ -354,9 +375,14 @@ roi_extractor = ROIExtractor(
     # phase-filtered candidate pool into many small disconnected clusters
     # per frame instead of the one giant blob threshold=0.03 alone used to
     # collapse everything into) would otherwise mean 913 downstream anneal
-    # jobs from one iteration. 100 matches the previous iteration's batch
-    # size; revisit once threshold itself is recalibrated (see above).
-    max_num_structures=100,
+    # jobs from one iteration. Lowered from rough_cu_water_al's 100 to 10
+    # here -- annealing + DFT are the expensive stages (each anneal box is
+    # a real MD run, each DFT box is the multi-hour-per-box VASP job this
+    # campaign spent a long time getting to actually finish at all -- see
+    # vasp_evaluator below), so this run trades ROI count for being able to
+    # complete full AL iterations in a reasonable wall-clock time; revisit
+    # once threshold itself is recalibrated (see above).
+    max_num_structures=10,
     cleanup_mode="molecule",
     solvent="H2O",
     normal_patch_radius=5.0,
@@ -404,7 +430,18 @@ embedding_annealer = EmbeddingAnnealer(
         {
             "species": ["H", "O"],
             "temperatures": [300.0, 300.0],
-            "run_steps": [25000],
+            # 50000, not rough_cu_water_al's 25000: checked real per-box
+            # thermo from that campaign's completed anneal (dashboard's
+            # annealer_thermo panel data) -- this stage starts from a real
+            # ~500-540K thermal spike (inherited from stage 0's hot Cu via
+            # nonbonded coupling while H/O sat frozen) despite its own
+            # 300K flat target, and spends a good chunk of its step budget
+            # just cooling back down before any genuine equilibration-at-
+            # -target happens. It did fully settle by the end of 25000
+            # steps (energy fluctuation dropped to ~0), but that leaves
+            # little genuine post-transient time; doubling gives real
+            # margin for that.
+            "run_steps": [50000],
             "pressure_z": 1.0,
         },
     ],
@@ -454,13 +491,18 @@ KSPACING_ESTIMATE = 0.274
 vasp_evaluator = VASPEvaluator(
     remote_fs=dirona_fs,
     cluster_config=dirona_perform_cluster,
-    # Only one job actually fits at a time: n_processors=128 (below) only
-    # satisfies -- and requests --exclusive on -- the "perform" partition's
-    # one 128-real-core node (c013; the other, c014, only has 64 and can
-    # never win this request), so higher values would just queue rather
-    # than genuinely run more concurrently. Revisit once/if a
-    # smaller-n_processors config is added for c014.
-    num_parallel=1,
+    # Requested as 3 (run2 vs. rough_cu_water_al's 1) -- but n_processors=128
+    # (below) requests --exclusive on the "perform" partition's one
+    # 128-real-core node (c013; the other, c014, only has 64 and can never
+    # win this request), so at most 1 of these 3 array-job slots can
+    # actually be RUNNING at once; the other 2 just sit queued behind it
+    # rather than genuinely running concurrently. Left at 3 as asked --
+    # harmless (SLURM just queues the rest), but if the intent was more
+    # real throughput, that needs a smaller n_processors (so >1 job fits on
+    # a node at once) rather than a bigger num_parallel, and n_processors=128
+    # was itself a deliberate choice (see incar_kwargs's own comment: this
+    # box size's NBANDS needs that scale to finish an SCF step at all).
+    num_parallel=3,
     n_processors=128,
     incar_kwargs={
         "xc": "RPBE",

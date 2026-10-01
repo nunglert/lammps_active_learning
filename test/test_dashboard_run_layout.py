@@ -7,13 +7,9 @@ built in ``tmp_path``, no cluster/pyace/LAMMPS involved.
 
 import json
 
-import numpy as np
 import pytest
-from ase import Atoms
 
-ase_io = pytest.importorskip("ase.io")
-
-from lammps_al.dashboard import run_layout  # noqa: E402
+from lammps_al.dashboard import run_layout
 
 pytestmark = pytest.mark.local
 
@@ -26,18 +22,6 @@ def _write_progress(calchome, outputs):
     (calchome / "AL_progress.json").write_text(
         json.dumps({"stages": list(outputs), "outputs": outputs})
     )
-
-
-def _make_config(rng, e_ref, n_atoms=3):
-    atoms = Atoms(
-        "H" * n_atoms,
-        positions=rng.uniform(0, 5, size=(n_atoms, 3)),
-        cell=np.eye(3) * 10,
-        pbc=True,
-    )
-    atoms.info["REF_energy"] = e_ref
-    atoms.arrays["REF_forces"] = rng.normal(size=(n_atoms, 3))
-    return atoms
 
 
 # ---------------------------------------------------------------------------
@@ -168,78 +152,3 @@ def test_iteration_dirs(tmp_path):
 
 def test_iteration_dirs_missing_calchome(tmp_path):
     assert run_layout.iteration_dirs(tmp_path / "does_not_exist") == []
-
-
-# ---------------------------------------------------------------------------
-# new_evaluator_configs_for_iteration: both delta/cumulative branches
-# ---------------------------------------------------------------------------
-def _write_evaluator_iteration(tmp_path, it, configs):
-    out = tmp_path / "evaluator_output"
-    out.mkdir(exist_ok=True)
-    path = out / f"evaluator_it{it}_0.extxyz"
-    ase_io.write(path, configs)
-    return f"evaluator_output/{path.name}"
-
-
-def test_new_evaluator_configs_iteration_zero_returns_all(tmp_path):
-    rng = np.random.default_rng(0)
-    configs0 = [_make_config(rng, e_ref=-1.0), _make_config(rng, e_ref=-2.0)]
-    rel0 = _write_evaluator_iteration(tmp_path, 0, configs0)
-    _write_progress(tmp_path, {"evaluator": {"0": [rel0]}})
-    progress = run_layout.load_progress(tmp_path)
-
-    new = run_layout.new_evaluator_configs_for_iteration(tmp_path, progress, 0)
-    assert len(new) == 2
-
-
-def test_new_evaluator_configs_iteration_with_no_data_returns_empty(tmp_path):
-    _write_progress(tmp_path, {"evaluator": {}})
-    progress = run_layout.load_progress(tmp_path)
-    assert (
-        run_layout.new_evaluator_configs_for_iteration(tmp_path, progress, 0)
-        == []
-    )
-
-
-def test_new_evaluator_configs_detects_cumulative(tmp_path):
-    """iter 1's file contains iter 0's frames as a prefix plus 2 new ones."""
-    rng = np.random.default_rng(1)
-    configs0 = [_make_config(rng, e_ref=-1.0), _make_config(rng, e_ref=-2.0)]
-    new_configs = [
-        _make_config(rng, e_ref=-3.0),
-        _make_config(rng, e_ref=-4.0),
-    ]
-    rel0 = _write_evaluator_iteration(tmp_path, 0, configs0)
-    rel1 = _write_evaluator_iteration(tmp_path, 1, configs0 + new_configs)
-    _write_progress(tmp_path, {"evaluator": {"0": [rel0], "1": [rel1]}})
-    progress = run_layout.load_progress(tmp_path)
-
-    new = run_layout.new_evaluator_configs_for_iteration(tmp_path, progress, 1)
-
-    assert len(new) == 2
-    assert [a.info["REF_energy"] for a in new] == [-3.0, -4.0]
-
-
-def test_new_evaluator_configs_detects_delta(tmp_path):
-    """iter 1's file is unrelated to iter 0's -- treated as all-new."""
-    rng = np.random.default_rng(2)
-    configs0 = [_make_config(rng, e_ref=-1.0), _make_config(rng, e_ref=-2.0)]
-    configs1 = [_make_config(rng, e_ref=-5.0), _make_config(rng, e_ref=-6.0)]
-    rel0 = _write_evaluator_iteration(tmp_path, 0, configs0)
-    rel1 = _write_evaluator_iteration(tmp_path, 1, configs1)
-    _write_progress(tmp_path, {"evaluator": {"0": [rel0], "1": [rel1]}})
-    progress = run_layout.load_progress(tmp_path)
-
-    new = run_layout.new_evaluator_configs_for_iteration(tmp_path, progress, 1)
-
-    assert len(new) == 2
-    assert [a.info["REF_energy"] for a in new] == [-5.0, -6.0]
-
-
-def test_new_evaluator_configs_out_of_range_iteration_returns_empty(tmp_path):
-    _write_progress(tmp_path, {"evaluator": {}})
-    progress = run_layout.load_progress(tmp_path)
-    assert (
-        run_layout.new_evaluator_configs_for_iteration(tmp_path, progress, 5)
-        == []
-    )

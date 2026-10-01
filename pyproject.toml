@@ -71,6 +71,8 @@ dashboard = [
     # same portable PyPI package as ace_tensorpot_gpu's matscipy, just also
     # needed here, independent of that extra.
     "matscipy",
+    # The CLI's dashboard.yaml config (lammps_al.dashboard.cli).
+    "pyyaml",
 ]
 dev = [
     "pytest",

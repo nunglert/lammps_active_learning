@@ -8,9 +8,6 @@ need no committee at all -- they read per-atom ``uncertainty`` arrays
 directly off synthetic sampler trajectories.
 """
 
-import json
-from pathlib import Path
-
 import numpy as np
 import pytest
 from ase import Atoms
@@ -25,7 +22,6 @@ pytest.importorskip("alviz.dashboard")
 
 from alviz.dashboard import Dashboard  # noqa: E402
 
-from lammps_al.dashboard import run_layout  # noqa: E402
 from lammps_al.dashboard.panels.committee_parity import (  # noqa: E402
     CommitteeParityPanel,
     HeldOutParityPanel,
@@ -107,46 +103,81 @@ def test_committee_parity_panel_no_configs_raises(tmp_path):
         panel.compute_data({})
 
 
-def test_held_out_parity_panel_uses_new_configs_only(monkeypatch, tmp_path):
+def _held_out_files(tmp_path, configs0, configs1):
+    path0 = tmp_path / "evaluator_it0_0.extxyz"
+    path1 = tmp_path / "evaluator_it1_0.extxyz"
+    ase_io.write(path0, configs0)
+    ase_io.write(path1, configs1)
+    return [path1], [path0]
+
+
+def test_held_out_parity_panel_cumulative_uses_new_configs_only(
+    monkeypatch, tmp_path
+):
+    """iter 1's file contains iter 0's frames as a prefix plus 2 new ones."""
     monkeypatch.setattr(
         "lammps_al.dashboard.panels.committee_parity.score_with_committee",
         _fake_score_with_committee,
     )
-    calchome = tmp_path / "calchome"
-    (calchome / "evaluator_output").mkdir(parents=True)
     rng = np.random.default_rng(1)
     configs0 = [_make_config(rng, e_ref=-1.0)]
     new_configs = [
         _make_config(rng, e_ref=-2.0),
         _make_config(rng, e_ref=-3.0),
     ]
-    ase_io.write(
-        calchome / "evaluator_output" / "evaluator_it0_0.extxyz", configs0
+    current, previous = _held_out_files(
+        tmp_path, configs0, configs0 + new_configs
     )
-    ase_io.write(
-        calchome / "evaluator_output" / "evaluator_it1_0.extxyz",
-        configs0 + new_configs,
-    )
-    progress = [
-        {"evaluator_output": ["evaluator_output/evaluator_it0_0.extxyz"]},
-        {"evaluator_output": ["evaluator_output/evaluator_it1_0.extxyz"]},
-    ]
 
     panel = HeldOutParityPanel(
-        calchome, progress, 1, ["m0.yaml"], datapath=tmp_path
+        current, previous, ["m0.yaml"], per_atom=False, datapath=tmp_path
     )
     data = panel.compute_data({})
 
-    assert len(data.e_obs) == 2  # only the 2 new-to-iteration-1 configs
+    # only the 2 new-to-iteration-1 configs
+    assert data.e_obs == pytest.approx([-2.0, -3.0])
 
 
-def test_held_out_parity_panel_iteration_zero_raises(tmp_path):
-    calchome = tmp_path / "calchome"
-    calchome.mkdir()
-    progress = [{"evaluator_output": []}]
-    panel = HeldOutParityPanel(
-        calchome, progress, 0, ["m.yaml"], datapath=tmp_path
+def test_held_out_parity_panel_delta_uses_all_configs(monkeypatch, tmp_path):
+    """iter 1's file is unrelated to iter 0's -- treated as all-new."""
+    monkeypatch.setattr(
+        "lammps_al.dashboard.panels.committee_parity.score_with_committee",
+        _fake_score_with_committee,
     )
+    rng = np.random.default_rng(2)
+    configs0 = [_make_config(rng, e_ref=-1.0), _make_config(rng, e_ref=-2.0)]
+    configs1 = [_make_config(rng, e_ref=-5.0), _make_config(rng, e_ref=-6.0)]
+    current, previous = _held_out_files(tmp_path, configs0, configs1)
+
+    panel = HeldOutParityPanel(
+        current, previous, ["m0.yaml"], per_atom=False, datapath=tmp_path
+    )
+    data = panel.compute_data({})
+
+    assert data.e_obs == pytest.approx([-5.0, -6.0])
+
+
+def test_held_out_parity_panel_no_previous_configs_uses_all(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(
+        "lammps_al.dashboard.panels.committee_parity.score_with_committee",
+        _fake_score_with_committee,
+    )
+    rng = np.random.default_rng(3)
+    path = tmp_path / "evaluator_it1_0.extxyz"
+    ase_io.write(
+        path, [_make_config(rng, e_ref=-1.0), _make_config(rng, e_ref=-2.0)]
+    )
+
+    panel = HeldOutParityPanel([path], [], ["m0.yaml"], datapath=tmp_path)
+    data = panel.compute_data({})
+
+    assert len(data.e_obs) == 2
+
+
+def test_held_out_parity_panel_no_configs_raises(tmp_path):
+    panel = HeldOutParityPanel([], [], ["m.yaml"], datapath=tmp_path)
     with pytest.raises(ValueError):
         panel.compute_data({})
 
@@ -204,16 +235,12 @@ def test_species_force_parity_panel_missing_species_gets_none(
 # ---------------------------------------------------------------------------
 # UncertaintyTrendPanel / UncertaintyDepthProfilePanel
 # ---------------------------------------------------------------------------
-def _write_uncertainty_traj(calchome, it, frames):
+def _write_uncertainty_traj(tmp_path, it, frames):
     """frames: list of (positions_z_for_Cu_H_O_triplet, uncertainties).
 
-    Writes to ``uncertainty_select_output/`` (CommitteeUncertaintySelector's
-    recorded, annotated-but-not-reduced output) and merges an
-    ``AL_progress.json`` entry for it, so ``run_layout.load_progress``
-    resolves the path -- mirrors the real ring's on-disk shape.
+    Returns the written path -- the shape of one
+    ``uncertainty_select_output`` entry (annotated, not reduced).
     """
-    out = calchome / "uncertainty_select_output"
-    out.mkdir(parents=True, exist_ok=True)
     configs = []
     for z_positions, uncertainties in frames:
         atoms = Atoms(
@@ -224,30 +251,23 @@ def _write_uncertainty_traj(calchome, it, frames):
         )
         atoms.arrays["uncertainty"] = np.asarray(uncertainties)
         configs.append(atoms)
-    rel = f"uncertainty_select_output/u_it{it}_0.extxyz"
-    ase_io.write(out / f"u_it{it}_0.extxyz", configs)
-
-    progress_file = calchome / "AL_progress.json"
-    data = (
-        json.loads(progress_file.read_text())
-        if progress_file.exists()
-        else {"stages": ["uncertainty_select"], "outputs": {}}
-    )
-    data["outputs"].setdefault("uncertainty_select", {})[str(it)] = [rel]
-    progress_file.write_text(json.dumps(data))
+    path = tmp_path / f"u_it{it}_0.extxyz"
+    ase_io.write(path, configs)
+    return path
 
 
 def test_uncertainty_trend_panel(tmp_path):
-    calchome = tmp_path / "calchome"
-    _write_uncertainty_traj(calchome, 0, [([0.0, 1.0, 2.0], [0.1, 0.2, 0.3])])
-    _write_uncertainty_traj(
-        calchome, 1, [([0.0, 1.0, 2.0], [0.01, 0.02, 0.03])]
-    )
-    progress = run_layout.load_progress(calchome)
+    trajectories = {
+        # Deliberately out of order: the panel sorts by iteration.
+        1: _write_uncertainty_traj(
+            tmp_path, 1, [([0.0, 1.0, 2.0], [0.01, 0.02, 0.03])]
+        ),
+        0: _write_uncertainty_traj(
+            tmp_path, 0, [([0.0, 1.0, 2.0], [0.1, 0.2, 0.3])]
+        ),
+    }
 
-    panel = UncertaintyTrendPanel(
-        calchome, progress, [0, 1], datapath=tmp_path
-    )
+    panel = UncertaintyTrendPanel(trajectories, datapath=tmp_path)
     board = Dashboard(1, 1, fail_silently=False)
     board.register_entry(panel, ("0", "0"))
     board.allocate_panels()
@@ -260,43 +280,22 @@ def test_uncertainty_trend_panel(tmp_path):
     assert panel.data.mean[1] < panel.data.mean[0]  # converging
 
 
-def test_uncertainty_trend_panel_skips_missing_iterations(tmp_path):
-    calchome = tmp_path / "calchome"
-    _write_uncertainty_traj(calchome, 0, [([0.0, 1.0, 2.0], [0.1, 0.1, 0.1])])
-    progress = run_layout.load_progress(calchome)
-
-    panel = UncertaintyTrendPanel(
-        calchome, progress, [0, 1, 2], datapath=tmp_path
-    )
-    data = panel.compute_data({})
-
-    assert data.iterations == [0]
-
-
 def test_uncertainty_trend_panel_no_data_raises(tmp_path):
-    calchome = tmp_path / "calchome"
-    calchome.mkdir()
-    (calchome / "AL_progress.json").write_text(
-        json.dumps({"stages": [], "outputs": {}})
-    )
-    progress = run_layout.load_progress(calchome)
-    panel = UncertaintyTrendPanel(calchome, progress, [0], datapath=tmp_path)
+    panel = UncertaintyTrendPanel({}, datapath=tmp_path)
     with pytest.raises(ValueError):
         panel.compute_data({})
 
 
 def test_uncertainty_depth_profile_panel_bins_by_depth(tmp_path):
-    calchome = tmp_path / "calchome"
     # Cu at z=0 (interface z0=0); H at z=-5 (inside slab); O at z=5 (in water).
-    _write_uncertainty_traj(calchome, 0, [([0.0, -5.0, 5.0], [0.0, 0.5, 1.0])])
-    progress = run_layout.load_progress(calchome)
+    path = _write_uncertainty_traj(
+        tmp_path, 0, [([0.0, -5.0, 5.0], [0.0, 0.5, 1.0])]
+    )
 
     # bin_width=2.0 puts depth=-5.0/+5.0 exactly on bin centers (-9,-7,-5,
     # -3,-1,1,3,5,7,9), avoiding ambiguous edge-of-bin assignment.
     panel = UncertaintyDepthProfilePanel(
-        calchome,
-        progress,
-        [0],
+        {0: path},
         depth_range=(-10.0, 10.0),
         bin_width=2.0,
         datapath=tmp_path,
@@ -321,15 +320,13 @@ def test_uncertainty_depth_profile_panel_bins_by_depth(tmp_path):
 def test_uncertainty_depth_profile_panel_no_interface_species_skipped(
     tmp_path,
 ):
-    calchome = tmp_path / "calchome"
-    _write_uncertainty_traj(calchome, 0, [([0.0, 1.0, 2.0], [0.1, 0.2, 0.3])])
-    progress = run_layout.load_progress(calchome)
+    path = _write_uncertainty_traj(
+        tmp_path, 0, [([0.0, 1.0, 2.0], [0.1, 0.2, 0.3])]
+    )
 
     # interface_species="Ag" never appears -- frame has no interface atoms.
     panel = UncertaintyDepthProfilePanel(
-        calchome,
-        progress,
-        [0],
+        {0: path},
         interface_species=("Ag",),
         datapath=tmp_path,
     )

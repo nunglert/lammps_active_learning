@@ -13,11 +13,13 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+from alviz import PanelSpec, register_panel
 from alviz.dashboard import Entry
 from alviz.data import PanelData
 from alviz.panels.training.parity import parity_scatter
 
 from lammps_al.dashboard.committee_eval import score_with_committee
+from lammps_al.dashboard.context import named
 from lammps_al.dashboard.panels.committee_parity import _mae, _read_all, _rmse
 
 
@@ -114,3 +116,35 @@ class SpeciesForceParityPanel(Entry):
                 ylabel="predicted F (eV/Å)",
                 title=sym,
             )
+
+
+class SpeciesForceParitySpec(PanelSpec):
+    """``species`` left unset inherits the run-global ``--species``."""
+
+    type: str = "species_force_parity"
+    species: Optional[list[str]] = None
+
+
+def _build_species_force_parity(spec, ctx, common):
+    if ctx.is_summary:
+        return None
+    if not (ctx.model_files and ctx.config_files):
+        return ctx.skip(
+            spec.type,
+            f"model_files={len(ctx.model_files)}, "
+            f"config_files={len(ctx.config_files)}",
+        )
+    if not spec.species:
+        return ctx.skip(spec.type, "no species list")
+    return SpeciesForceParityPanel(
+        ctx.config_files,
+        ctx.model_files,
+        spec.species,
+        **named(spec),
+        **common,
+    )
+
+
+register_panel(
+    "species_force_parity", SpeciesForceParitySpec, _build_species_force_parity
+)

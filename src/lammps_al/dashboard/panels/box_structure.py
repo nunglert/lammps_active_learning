@@ -17,12 +17,13 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from typing import Literal, Optional
 
 import numpy as np
+from alviz import PanelSpec, register_panel
 from alviz.dashboard import Entry
 from alviz.data import PanelData
 
-from lammps_al.dashboard import run_layout
 from lammps_al.dashboard.structure_stats import (
     box_composition,
     compute_partial_rdf,
@@ -31,19 +32,14 @@ from lammps_al.dashboard.structure_stats import (
 logger = logging.getLogger(__name__)
 
 
-def _load_pre_anneal_boxes(calchome, progress, iteration):
-    """Read every box in one iteration's selector_output as Atoms.
+def _load_pre_anneal_boxes(manifest_path):
+    """Read every box listed in a selector_output manifest as Atoms.
 
     One ``(box_index, Atoms)`` pair per manifest entry -- box index is
     meaningful here (matches the manifest's own ``"index"``).
     """
     import ase.io
 
-    manifest_path = run_layout.selector_output_manifest(
-        calchome, progress, iteration
-    )
-    if manifest_path is None:
-        return []
     manifest = json.loads(manifest_path.read_text())
     boxes = []
     for entry in manifest:
@@ -58,8 +54,8 @@ def _load_pre_anneal_boxes(calchome, progress, iteration):
     return boxes
 
 
-def _load_post_anneal_boxes(calchome, progress, iteration):
-    """Read one iteration's annealed boxes as Atoms.
+def _load_post_anneal_boxes(path):
+    """Read one iteration's annealed boxes (combined extxyz) as Atoms.
 
     Unlike the pre-anneal path, this has no manifest to key against --
     ``annealer_output`` is a flat combined extxyz (see
@@ -71,9 +67,6 @@ def _load_post_anneal_boxes(calchome, progress, iteration):
     """
     import ase.io
 
-    path = run_layout.annealed_configs(calchome, progress, iteration)
-    if path is None:
-        return []
     return list(enumerate(ase.io.read(path, index=":")))
 
 
@@ -98,10 +91,9 @@ class BoxCompositionPanel(Entry):
     iteration, a histogram over all of them is what's actually readable).
 
     Args:
-        calchome: The campaign's ``calchome`` directory.
-        progress: Normalized per-iteration progress list (from
-            ``run_layout.load_progress``).
-        iteration: Which iteration's carved boxes to read.
+        boxes_path: The ``selector_output`` manifest (``source=
+            "pre_anneal"``) or the combined annealed extxyz (``source=
+            "post_anneal"``).
         source: ``"pre_anneal"`` (as-carved, default) or ``"post_anneal"``
             -- composition doesn't change during annealing (same atoms,
             just relaxed positions), so this only matters if you want to
@@ -114,17 +106,13 @@ class BoxCompositionPanel(Entry):
 
     def __init__(
         self,
-        calchome,
-        progress,
-        iteration: int,
+        boxes_path,
         *args,
         source: str = "pre_anneal",
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        self._calchome = Path(calchome)
-        self._progress = progress
-        self._iteration = iteration
+        self._boxes_path = Path(boxes_path)
         self._source = source
 
     def allocate_panels(self, fig):
@@ -135,13 +123,11 @@ class BoxCompositionPanel(Entry):
         self.ax_total = fig.add_subplot(self.gs[2])
 
     def compute_data(self, shared_ressources: dict) -> BoxCompositionData:
-        boxes = _LOADERS[self._source](
-            self._calchome, self._progress, self._iteration
-        )
+        boxes = _LOADERS[self._source](self._boxes_path)
         if not boxes:
             raise ValueError(
-                f"No carved boxes ({self._source}) found for iteration "
-                f"{self._iteration}."
+                f"No carved boxes ({self._source}) found in "
+                f"{self._boxes_path}."
             )
         n_atoms, n_cu, n_h2o = [], [], []
         for _idx, atoms in boxes:
@@ -150,8 +136,7 @@ class BoxCompositionPanel(Entry):
             n_cu.append(comp.get("Cu", 0))
             n_h2o.append(comp["n_h2o_approx"])
         logger.info(
-            "iteration %d (%s): composition read for %d box(es).",
-            self._iteration,
+            "%s: composition read for %d box(es).",
             self._source,
             len(boxes),
         )
@@ -203,10 +188,9 @@ class BoxRDFPanel(Entry):
     iteration's carved boxes, via ``matscipy``.
 
     Args:
-        calchome: The campaign's ``calchome`` directory.
-        progress: Normalized per-iteration progress list (from
-            ``run_layout.load_progress``).
-        iteration: Which iteration's carved boxes to read.
+        boxes_path: The ``selector_output`` manifest (``source=
+            "pre_anneal"``) or the combined annealed extxyz (``source=
+            "post_anneal"``).
         source: ``"pre_anneal"`` (as-carved, straight from MD sampling) or
             ``"post_anneal"`` (after the frozen-core anneal -- the
             structures that actually go to DFT). Comparing the two answers
@@ -225,9 +209,7 @@ class BoxRDFPanel(Entry):
 
     def __init__(
         self,
-        calchome,
-        progress,
-        iteration: int,
+        boxes_path,
         *args,
         source: str = "pre_anneal",
         pairs=None,
@@ -237,9 +219,7 @@ class BoxRDFPanel(Entry):
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        self._calchome = Path(calchome)
-        self._progress = progress
-        self._iteration = iteration
+        self._boxes_path = Path(boxes_path)
         self._source = source
         self._pairs = pairs or _DEFAULT_PAIRS
         self._nbins = nbins
@@ -254,13 +234,11 @@ class BoxRDFPanel(Entry):
         ]
 
     def compute_data(self, shared_ressources: dict) -> BoxRDFData:
-        boxes = _LOADERS[self._source](
-            self._calchome, self._progress, self._iteration
-        )
+        boxes = _LOADERS[self._source](self._boxes_path)
         if not boxes:
             raise ValueError(
-                f"No carved boxes ({self._source}) found for iteration "
-                f"{self._iteration}."
+                f"No carved boxes ({self._source}) found in "
+                f"{self._boxes_path}."
             )
 
         r_out, g_mean_out, g_low_out, g_high_out, n_out = {}, {}, {}, {}, {}
@@ -276,9 +254,7 @@ class BoxRDFPanel(Entry):
                     per_box_g.append(g)
             if not per_box_g:
                 logger.info(
-                    "iteration %d (%s), pair %s: no box had both species "
-                    "-- skipping.",
-                    self._iteration,
+                    "%s, pair %s: no box had both species -- skipping.",
                     self._source,
                     key,
                 )
@@ -296,13 +272,11 @@ class BoxRDFPanel(Entry):
 
         if not r_out:
             raise ValueError(
-                f"No pair had data in any box for iteration {self._iteration}"
-                f" ({self._source})."
+                f"No pair had data in any box of {self._boxes_path} "
+                f"({self._source})."
             )
         logger.info(
-            "iteration %d (%s): RDFs computed for pairs %s (%d box(es) "
-            "checked).",
-            self._iteration,
+            "%s: RDFs computed for pairs %s (%d box(es) checked).",
             self._source,
             list(r_out.keys()),
             len(boxes),
@@ -329,3 +303,75 @@ class BoxRDFPanel(Entry):
             ax.set_xlabel("r (Å)")
             ax.set_ylabel("g(r)")
             ax.set_title(f"{key} ({self._source}, {d.n_boxes[key]} boxes)")
+
+
+def _boxes_path(spec, ctx):
+    """The ``source``'s input path for this page, or ``None`` (logged)."""
+    if spec.source == "pre_anneal":
+        if ctx.selector_manifest is None:
+            return ctx.skip(spec.type, "no selector_output recorded")
+        return ctx.selector_manifest
+    if ctx.annealed_configs is None:
+        return ctx.skip(spec.type, "no annealer_output recorded")
+    return ctx.annealed_configs
+
+
+def _box_name(spec, base):
+    """Param-keyed default name -- ``Entry.name`` doubles as the JSON cache
+    filename, so a pre- and post-anneal instance must not share one."""
+    if spec.name:
+        return spec.name
+    return base if spec.source == "pre_anneal" else f"{base}_{spec.source}"
+
+
+class BoxCompositionSpec(PanelSpec):
+    type: str = "box_composition"
+    source: Literal["pre_anneal", "post_anneal"] = "pre_anneal"
+
+
+def _build_box_composition(spec, ctx, common):
+    if ctx.is_summary:
+        return None
+    path = _boxes_path(spec, ctx)
+    if path is None:
+        return None
+    return BoxCompositionPanel(
+        path,
+        source=spec.source,
+        name=_box_name(spec, BoxCompositionPanel.name),
+        **common,
+    )
+
+
+class BoxRDFSpec(PanelSpec):
+    """``pairs``: ``[[species_a, species_b, cutoff], ...]``; unset uses
+    Cu-Cu/O-O/O-H/Cu-O."""
+
+    type: str = "box_rdf"
+    source: Literal["pre_anneal", "post_anneal"] = "pre_anneal"
+    pairs: Optional[list[tuple[str, str, float]]] = None
+    nbins: int = 80
+    low_pct: float = 10
+    high_pct: float = 90
+
+
+def _build_box_rdf(spec, ctx, common):
+    if ctx.is_summary:
+        return None
+    path = _boxes_path(spec, ctx)
+    if path is None:
+        return None
+    return BoxRDFPanel(
+        path,
+        source=spec.source,
+        pairs=spec.pairs,
+        nbins=spec.nbins,
+        low_pct=spec.low_pct,
+        high_pct=spec.high_pct,
+        name=_box_name(spec, BoxRDFPanel.name),
+        **common,
+    )
+
+
+register_panel("box_composition", BoxCompositionSpec, _build_box_composition)
+register_panel("box_rdf", BoxRDFSpec, _build_box_rdf)

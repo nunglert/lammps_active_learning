@@ -2,7 +2,8 @@
 
 Thin wrapper -- see ``lammps_al.dashboard.cli`` for the actual
 implementation and flags (``--only``/``--exclude``/``--species``/
-``--output``). Run as ``python dashboard.py`` from this directory, or
+``--output``/``--config``); a ``calchome/dashboard.yaml`` is picked up
+automatically (see that module's docstring for its format). Run as ``python dashboard.py`` from this directory, or
 ``python experiments/rough_cu_water_al/dashboard.py`` from the repo root.
 """
 

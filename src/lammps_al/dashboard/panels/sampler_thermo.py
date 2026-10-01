@@ -1,5 +1,5 @@
 """Sampler MD diagnostics: classical thermo trajectory, read straight from
-LAMMPS's own log (``run_layout.sampler_lmp_log``) via ``lammps_log``.
+LAMMPS's own log via ``lammps_log``.
 
 We're driving classical MD here (a committee potential, not DFT), so the
 usual sanity checks apply and are cheap to get for free: did temperature
@@ -13,10 +13,11 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from alviz import PanelSpec, register_panel
 from alviz.dashboard import Entry
 from alviz.data import PanelData
 
-from lammps_al.dashboard import run_layout
+from lammps_al.dashboard.context import named
 from lammps_al.dashboard.lammps_log import read_lammps_thermo
 
 logger = logging.getLogger(__name__)
@@ -46,18 +47,17 @@ class SamplerThermoPanel(Entry):
     """Sampler LAMMPS thermo (temperature/energy/pressure) vs. step.
 
     Args:
-        calchome: The campaign's ``calchome`` directory.
-        iteration: Which iteration's sampler run to read.
+        log_path: The sampler run's LAMMPS log (see
+            ``run_layout.sampler_lmp_log``).
     """
 
     name = "sampler_thermo"
     data_class = SamplerThermoData
     colspan = 2
 
-    def __init__(self, calchome, iteration: int, *args, **kwargs):
+    def __init__(self, log_path, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._calchome = Path(calchome)
-        self._iteration = iteration
+        self._log_path = Path(log_path)
 
     def allocate_panels(self, fig):
         self._fig = fig
@@ -65,19 +65,14 @@ class SamplerThermoPanel(Entry):
         self.axes = [fig.add_subplot(self.gs[i]) for i in range(len(_FIELDS))]
 
     def compute_data(self, shared_ressources: dict) -> SamplerThermoData:
-        log_path = run_layout.sampler_lmp_log(self._calchome, self._iteration)
-        if log_path is None:
-            raise ValueError(
-                f"No sampler LAMMPS log for iteration {self._iteration}."
-            )
+        log_path = self._log_path
         df = read_lammps_thermo(log_path)
         if df.empty:
             raise ValueError(f"No thermo data parsed from {log_path}.")
 
         present = [f for f, _ in _FIELDS if f in df.columns]
         logger.info(
-            "iteration %d: %d thermo row(s), fields=%s, from %s.",
-            self._iteration,
+            "%d thermo row(s), fields=%s, from %s.",
             len(df),
             present,
             log_path,
@@ -109,3 +104,18 @@ class SamplerThermoPanel(Entry):
             ax.set_xlabel("step")
             ax.set_ylabel(label)
         self.axes[0].set_title(self.name)
+
+
+class SamplerThermoSpec(PanelSpec):
+    type: str = "sampler_thermo"
+
+
+def _build_sampler_thermo(spec, ctx, common):
+    if ctx.is_summary:
+        return None
+    if ctx.sampler_log is None:
+        return ctx.skip(spec.type, "no sampler LAMMPS log found")
+    return SamplerThermoPanel(ctx.sampler_log, **named(spec), **common)
+
+
+register_panel("sampler_thermo", SamplerThermoSpec, _build_sampler_thermo)

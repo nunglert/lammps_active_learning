@@ -9,13 +9,17 @@ committee are compared -- see each class's docstring.
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import numpy as np
+from alviz import PanelSpec, register_panel
 from alviz.panels.training.parity import ParityData, ParityPanel
 
-from lammps_al.dashboard import run_layout
 from lammps_al.dashboard.committee_eval import score_with_committee
+from lammps_al.dashboard.context import named
+
+logger = logging.getLogger(__name__)
 
 
 def _rmse(a, b):
@@ -33,6 +37,57 @@ def _read_all(config_files):
     for path in config_files:
         atoms_list.extend(ase.io.read(path, index=":"))
     return atoms_list
+
+
+def _frames_match(a_frames, b_frames, tol: float = 1e-8) -> bool:
+    """Cheap content check between two equal-length frame lists.
+
+    Compares atom count and ``REF_energy`` of the first and last frame only
+    -- enough to distinguish "these are the same underlying frames" from
+    "these are unrelated data" without reading every array in every frame.
+    """
+    if len(a_frames) != len(b_frames):
+        return False
+    for a, b in zip((a_frames[0], a_frames[-1]), (b_frames[0], b_frames[-1])):
+        if len(a) != len(b):
+            return False
+        ea = a.info.get("REF_energy")
+        eb = b.info.get("REF_energy")
+        if ea is None or eb is None or abs(ea - eb) > tol:
+            return False
+    return True
+
+
+def _new_frames(current, previous) -> list:
+    """The frames of ``current`` not already in ``previous``.
+
+    Whether an iteration's evaluator output is a fresh delta or
+    cumulative-to-date is not a settled property of remote_handler's
+    evaluator -- so this auto-detects: if ``current`` is a strict superset
+    of ``previous`` (by count, with matching first/last-frame content), only
+    the new tail is returned; otherwise all of ``current`` is treated as
+    new. Logs which case fired.
+    """
+    if (
+        len(current) > len(previous)
+        and previous
+        and _frames_match(current[: len(previous)], previous)
+    ):
+        logger.info(
+            "Evaluator output looks cumulative (contains the previous "
+            "iteration's %d frames as a prefix); using only the new tail "
+            "(%d frames).",
+            len(previous),
+            len(current) - len(previous),
+        )
+        return current[len(previous) :]
+    if previous:
+        logger.info(
+            "Evaluator output looks like a delta (does not extend the "
+            "previous iteration's as a prefix); using all %d frames.",
+            len(current),
+        )
+    return current
 
 
 def _parity_data_from_configs(
@@ -140,21 +195,21 @@ class HeldOutParityPanel(ParityPanel):
     sampling is finding genuinely informative configs.
 
     Args:
-        calchome: The campaign's ``calchome`` directory.
-        progress: Pre-loaded ``AL_progress.json`` (see
-            ``run_layout.load_progress``); loaded internally if ``None``.
-        iteration: Which iteration's new evaluator configs to score.
+        config_files: The iteration's evaluated (DFT-labelled) configs.
+        previous_config_files: The previous iteration's evaluated configs
+            (empty if none) -- frames already in there are dropped when
+            ``config_files`` turns out to be cumulative (see
+            :func:`_new_frames`).
         model_files: The committee that drove that iteration's sampling
-            (typically ``trainer_models_for_iteration(iteration - 1)``).
+            (the previous iteration's trained models).
     """
 
     name = "held_out_parity"
 
     def __init__(
         self,
-        calchome,
-        progress,
-        iteration: int,
+        config_files,
+        previous_config_files,
         model_files,
         *args,
         per_atom: bool = True,
@@ -165,27 +220,78 @@ class HeldOutParityPanel(ParityPanel):
         super().__init__(
             *args, show_forces=show_forces, plot_kwargs=plot_kwargs, **kwargs
         )
-        self._calchome = Path(calchome)
-        self._progress = progress
-        self._iteration = iteration
+        self._config_files = [Path(p) for p in config_files]
+        self._previous_config_files = [Path(p) for p in previous_config_files]
         self._model_files = [Path(p) for p in model_files]
         self._per_atom = per_atom
 
     def compute_data(self, shared_ressources: dict) -> ParityData:
-        progress = self._progress
-        if progress is None:
-            progress = run_layout.load_progress(self._calchome)
-        atoms_list = run_layout.new_evaluator_configs_for_iteration(
-            self._calchome, progress, self._iteration
+        atoms_list = _new_frames(
+            _read_all(self._config_files),
+            _read_all(self._previous_config_files),
         )
         if not atoms_list:
-            raise ValueError(
-                f"No new evaluator configs for iteration {self._iteration}; "
-                "nothing to score."
-            )
+            raise ValueError("No new evaluator configs; nothing to score.")
         return _parity_data_from_configs(
             atoms_list,
             self._model_files,
             per_atom=self._per_atom,
             show_forces=self._show_forces,
         )
+
+
+class CommitteeParitySpec(PanelSpec):
+    type: str = "committee_parity"
+    per_atom: bool = True
+    show_forces: bool = True
+
+
+def _build_committee_parity(spec, ctx, common):
+    if ctx.is_summary:
+        return None
+    if not (ctx.model_files and ctx.config_files):
+        return ctx.skip(
+            spec.type,
+            f"model_files={len(ctx.model_files)}, "
+            f"config_files={len(ctx.config_files)}",
+        )
+    return CommitteeParityPanel(
+        ctx.config_files,
+        ctx.model_files,
+        per_atom=spec.per_atom,
+        show_forces=spec.show_forces,
+        **named(spec),
+        **common,
+    )
+
+
+class HeldOutParitySpec(PanelSpec):
+    type: str = "held_out_parity"
+    per_atom: bool = True
+    show_forces: bool = True
+
+
+def _build_held_out_parity(spec, ctx, common):
+    if ctx.is_summary:
+        return None
+    if not (ctx.prev_model_files and ctx.config_files):
+        return ctx.skip(
+            spec.type,
+            f"previous iteration's model_files={len(ctx.prev_model_files)},"
+            f" config_files={len(ctx.config_files)}",
+        )
+    return HeldOutParityPanel(
+        ctx.config_files,
+        ctx.prev_config_files,
+        ctx.prev_model_files,
+        per_atom=spec.per_atom,
+        show_forces=spec.show_forces,
+        **named(spec),
+        **common,
+    )
+
+
+register_panel(
+    "committee_parity", CommitteeParitySpec, _build_committee_parity
+)
+register_panel("held_out_parity", HeldOutParitySpec, _build_held_out_parity)

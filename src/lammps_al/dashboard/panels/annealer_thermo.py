@@ -21,10 +21,11 @@ import logging
 from pathlib import Path
 
 import numpy as np
+from alviz import PanelSpec, register_panel
 from alviz.dashboard import Entry
 from alviz.data import PanelData
 
-from lammps_al.dashboard import run_layout
+from lammps_al.dashboard.context import named
 from lammps_al.dashboard.lammps_log import read_lammps_thermo
 
 logger = logging.getLogger(__name__)
@@ -50,8 +51,8 @@ class AnnealerThermoPanel(Entry):
     iteration's annealed boxes.
 
     Args:
-        calchome: The campaign's ``calchome`` directory.
-        iteration: Which iteration's annealer boxes to read.
+        log_paths: One LAMMPS log per annealed box (see
+            ``run_layout.annealer_lmp_logs_for_iteration``).
         low_pct / high_pct: Percentile band to shade.
     """
 
@@ -61,16 +62,14 @@ class AnnealerThermoPanel(Entry):
 
     def __init__(
         self,
-        calchome,
-        iteration: int,
+        log_paths,
         *args,
         low_pct=10,
         high_pct=90,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        self._calchome = Path(calchome)
-        self._iteration = iteration
+        self._log_paths = [Path(p) for p in log_paths]
         self._low_pct = low_pct
         self._high_pct = high_pct
 
@@ -83,13 +82,9 @@ class AnnealerThermoPanel(Entry):
     def compute_data(self, shared_ressources: dict) -> AnnealerThermoData:
         import pandas as pd
 
-        logs = run_layout.annealer_lmp_logs_for_iteration(
-            self._calchome, self._iteration
-        )
+        logs = self._log_paths
         if not logs:
-            raise ValueError(
-                f"No annealer LAMMPS logs for iteration {self._iteration}."
-            )
+            raise ValueError("No annealer LAMMPS logs given.")
 
         per_box = []
         stage_boundary_steps: list = []
@@ -101,9 +96,8 @@ class AnnealerThermoPanel(Entry):
                 or "TotEng" not in df.columns
             ):
                 logger.info(
-                    "iteration %d, box %d: no usable thermo data in %s -- "
-                    "skipping this box.",
-                    self._iteration,
+                    "box %d: no usable thermo data in %s -- skipping this "
+                    "box.",
                     box_idx,
                     log_path,
                 )
@@ -121,12 +115,11 @@ class AnnealerThermoPanel(Entry):
 
         if not per_box:
             raise ValueError(
-                f"No box produced usable thermo data for iteration "
-                f"{self._iteration} ({len(logs)} log(s) checked)."
+                f"No box produced usable thermo data ({len(logs)} log(s) "
+                "checked)."
             )
         logger.info(
-            "iteration %d: aggregating thermo across %d/%d box(es).",
-            self._iteration,
+            "Aggregating thermo across %d/%d box(es).",
             len(per_box),
             len(logs),
         )
@@ -187,3 +180,26 @@ class AnnealerThermoPanel(Entry):
         self.ax_temp.set_title(f"{self.name} ({d.n_boxes_total} boxes)")
         self.ax_energy.set_ylabel("total energy - step-0 value (eV)")
         self.ax_energy.set_title("per-box energy drift")
+
+
+class AnnealerThermoSpec(PanelSpec):
+    type: str = "annealer_thermo"
+    low_pct: float = 10
+    high_pct: float = 90
+
+
+def _build_annealer_thermo(spec, ctx, common):
+    if ctx.is_summary:
+        return None
+    if not ctx.annealer_logs:
+        return ctx.skip(spec.type, "no annealer LAMMPS logs found")
+    return AnnealerThermoPanel(
+        ctx.annealer_logs,
+        low_pct=spec.low_pct,
+        high_pct=spec.high_pct,
+        **named(spec),
+        **common,
+    )
+
+
+register_panel("annealer_thermo", AnnealerThermoSpec, _build_annealer_thermo)

@@ -13,12 +13,14 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Literal
 
+from alviz import PanelSpec, register_panel
 from alviz.dashboard import Entry
 from alviz.data import PanelData
 
-from lammps_al.dashboard import run_layout
 from lammps_al.dashboard.committee_eval import read_pacemaker_metrics
+from lammps_al.dashboard.context import named
 
 logger = logging.getLogger(__name__)
 
@@ -45,10 +47,8 @@ class TrainingConvergencePanel(Entry):
     fit variance rather than genuine data-driven epistemic uncertainty.
 
     Args:
-        calchome: The campaign's ``calchome`` directory.
-        progress: Normalized per-iteration progress list (from
-            ``run_layout.load_progress``).
-        iteration: Which AL iteration's committee to read.
+        calcdirs: One pacemaker calcdir per committee member, named by
+            member index (see ``run_layout.trainer_calcdirs_for_iteration``).
         split: ``"train"`` (every fitting iteration) or ``"test"`` (sparser
             checkpoints, if pacemaker was configured with a held-out split).
     """
@@ -59,17 +59,13 @@ class TrainingConvergencePanel(Entry):
 
     def __init__(
         self,
-        calchome,
-        progress,
-        iteration: int,
+        calcdirs,
         *args,
         split: str = "train",
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
-        self._calchome = Path(calchome)
-        self._progress = progress
-        self._iteration = iteration
+        self._calcdirs = [Path(p) for p in calcdirs]
         self._split = split
 
     def allocate_panels(self, fig):
@@ -79,15 +75,9 @@ class TrainingConvergencePanel(Entry):
         self.ax_f = fig.add_subplot(self.gs[1])
 
     def compute_data(self, shared_ressources: dict) -> TrainingConvergenceData:
-        calcdirs = run_layout.trainer_calcdirs_for_iteration(
-            self._calchome, self._iteration
-        )
+        calcdirs = self._calcdirs
         if not calcdirs:
-            raise ValueError(
-                f"No trainer calcdirs found for iteration {self._iteration}"
-                " -- the trainer stage hasn't run (or its calcdirs weren't"
-                " kept)."
-            )
+            raise ValueError("No trainer calcdirs given.")
 
         iter_num: dict = {}
         rmse_epa: dict = {}
@@ -98,10 +88,10 @@ class TrainingConvergencePanel(Entry):
                 df = read_pacemaker_metrics(calcdir, split=self._split)
             except FileNotFoundError:
                 logger.info(
-                    "iteration %d, member %s: no %s metrics file -- "
-                    "skipping this member.",
-                    self._iteration,
+                    "member %s (%s): no %s metrics file -- skipping this "
+                    "member.",
                     member,
+                    calcdir,
                     self._split,
                 )
                 continue
@@ -112,7 +102,7 @@ class TrainingConvergencePanel(Entry):
         if not iter_num:
             raise ValueError(
                 f"No readable {self._split} metrics for any committee "
-                f"member at iteration {self._iteration}."
+                f"member ({len(calcdirs)} calcdir(s) checked)."
             )
         return TrainingConvergenceData(
             iter_num=iter_num, rmse_epa=rmse_epa, rmse_f_comp=rmse_f_comp
@@ -136,3 +126,25 @@ class TrainingConvergencePanel(Entry):
         self.ax_f.set_ylabel("RMSE force component (eV/Å)")
         self.ax_f.set_yscale("log")
         self.ax_f.set_title(f"{self._split}: forces")
+
+
+class TrainingConvergenceSpec(PanelSpec):
+    type: str = "training_convergence"
+    split: Literal["train", "test"] = "train"
+
+
+def _build_training_convergence(spec, ctx, common):
+    if ctx.is_summary:
+        return None
+    if not ctx.trainer_calcdirs:
+        return ctx.skip(spec.type, "no trainer calcdirs found")
+    return TrainingConvergencePanel(
+        ctx.trainer_calcdirs, split=spec.split, **named(spec), **common
+    )
+
+
+register_panel(
+    "training_convergence",
+    TrainingConvergenceSpec,
+    _build_training_convergence,
+)

@@ -3,7 +3,7 @@
 This is the project's *bridge*, adapted from ``jaxrens_al.dashboard.
 run_layout``'s proven pattern: it understands ``StagedActiveLearningHandler``'s
 run layout (the ``calchome`` tree + ``AL_progress.json``) and turns it into
-plain file paths / ``Atoms`` lists that dashboard panels consume. It reads
+plain file paths that dashboard panels consume (via :mod:`context`). It reads
 *artifacts only* and deliberately does **not** import ``remote_handler``: the
 dashboard side is coupled to the orchestrator's output *format*, not its
 code. ``AL_progress.json`` is the source of truth -- the recorded output
@@ -364,84 +364,3 @@ def trainer_calcdirs_for_iteration(calchome, it: int) -> list:
         "iteration %d: %d trainer calcdir(s) at %s.", it, len(dirs), base
     )
     return dirs
-
-
-def _frames_match(a_frames, b_frames, tol: float = 1e-8) -> bool:
-    """Cheap content check between two equal-length frame lists.
-
-    Compares atom count and ``REF_energy`` of the first and last frame only
-    -- enough to distinguish "these are the same underlying frames" from
-    "these are unrelated data" without reading every array in every frame.
-    """
-    if len(a_frames) != len(b_frames):
-        return False
-    for a, b in zip((a_frames[0], a_frames[-1]), (b_frames[0], b_frames[-1])):
-        if len(a) != len(b):
-            return False
-        ea = a.info.get("REF_energy")
-        eb = b.info.get("REF_energy")
-        if ea is None or eb is None or abs(ea - eb) > tol:
-            return False
-    return True
-
-
-def new_evaluator_configs_for_iteration(calchome, progress, it: int) -> list:
-    """Frames genuinely new to iteration ``it``'s evaluator output.
-
-    Whether ``evaluator_it{it}`` is a fresh delta or cumulative-to-date is
-    not a settled property of this campaign's remote_handler version (see
-    the dashboard plan doc) -- so this auto-detects: if iteration ``it``'s
-    frames are a strict superset of iteration ``it - 1``'s (by count, with
-    matching first/last-frame content), only the new tail is returned;
-    otherwise the whole file is treated as already-new. Logs which case
-    fired. Returns ``[]`` when iteration ``it`` has no evaluator output at
-    all (e.g. iteration 0 under ``entry_stage="trainer"``).
-    """
-    import ase.io
-
-    per_iter = evaluated_configs_per_iteration(calchome, progress)
-    if it < 0 or it >= len(per_iter) or not per_iter[it]:
-        logger.info(
-            "iteration %d has no recorded evaluator_output yet (%d "
-            "iteration(s) recorded total) -- the evaluator stage for this "
-            "iteration hasn't finished (or hasn't started).",
-            it,
-            len(per_iter),
-        )
-        return []
-
-    current = []
-    for f in per_iter[it]:
-        current.extend(ase.io.read(f, index=":"))
-
-    if it == 0 or it - 1 >= len(per_iter) or not per_iter[it - 1]:
-        return current
-
-    previous = []
-    for f in per_iter[it - 1]:
-        previous.extend(ase.io.read(f, index=":"))
-
-    if (
-        len(current) > len(previous)
-        and previous
-        and _frames_match(current[: len(previous)], previous)
-    ):
-        logger.info(
-            "evaluator_it%d looks cumulative (contains evaluator_it%d's "
-            "%d frames as a prefix); returning only the new tail "
-            "(%d frames).",
-            it,
-            it - 1,
-            len(previous),
-            len(current) - len(previous),
-        )
-        return current[len(previous) :]
-
-    logger.info(
-        "evaluator_it%d looks like a delta (does not extend evaluator_it%d "
-        "as a prefix); returning all %d frames as new.",
-        it,
-        it - 1,
-        len(current),
-    )
-    return current
