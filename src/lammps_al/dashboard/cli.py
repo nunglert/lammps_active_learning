@@ -23,7 +23,9 @@ directories are gitignored, not shipped with this repo).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
+import shutil
 from pathlib import Path
 
 from alviz.dashboard import Dashboard
@@ -63,6 +65,44 @@ def _any_entry_has_data(board: Dashboard, *, page_label: str) -> bool:
         failed,
     )
     return bool(ok)
+
+
+def _summary_cache_key(ctx) -> str:
+    """Short hash of the artifacts the campaign-summary page resolved.
+
+    alviz reuses an entry's ``<name>.json`` whenever it exists, but the
+    summary panels aggregate over a set of iterations that keeps growing
+    while the campaign runs. Keying the summary page's data directory on
+    what was found on disk (iterations, their trajectories and per-stage
+    status) makes every change to that set land in a fresh directory, so
+    stale JSON is never reused. Contents changing in place under an
+    unchanged path/status are not detected.
+    """
+    state = [
+        sorted(ctx.uncertainty_trajectories.items()),
+        [
+            (
+                c.iteration,
+                c.selector_manifest,
+                c.annealer_boxes,
+                c.dft_calcs,
+                c.config_files,
+            )
+            for c in ctx.iteration_contexts
+        ],
+    ]
+    return hashlib.sha1(repr(state).encode()).hexdigest()[:12]
+
+
+def _summary_datapath(out_dir: Path, ctx) -> Path:
+    """The summary page's keyed data dir; prunes stale sibling keys."""
+    root = out_dir / "campaign"
+    datapath = root / _summary_cache_key(ctx)
+    if root.is_dir():
+        for stale in root.iterdir():
+            if stale.is_dir() and stale != datapath:
+                shutil.rmtree(stale)
+    return datapath
 
 
 def build_dashboard_pdfs(
@@ -116,8 +156,10 @@ def build_dashboard_pdfs(
 
     pages = []
     for ctx in contexts:
-        page_datapath = out_dir / (
-            "campaign" if ctx.is_summary else f"iter_{ctx.iteration}"
+        page_datapath = (
+            _summary_datapath(out_dir, ctx)
+            if ctx.is_summary
+            else out_dir / f"iter_{ctx.iteration}"
         )
         page_datapath.mkdir(parents=True, exist_ok=True)
         entries = assemble(

@@ -196,6 +196,35 @@ def test_build_dashboard_pdfs_only_filters_panels(
     assert len(pages) == 1
 
 
+def test_summary_page_data_keyed_on_resolved_artifacts(
+    tmp_path, two_iteration_calchome
+):
+    out_dir = tmp_path / "dashboard_data"
+    species = ["Cu", "H", "O"]
+    cli.build_dashboard_pdfs(two_iteration_calchome, out_dir, species)
+    keyed = list((out_dir / "campaign").iterdir())
+    assert len(keyed) == 1 and (keyed[0] / "page.pdf").exists()
+
+    # Unchanged calchome -> same key, cached JSON reused.
+    cli.build_dashboard_pdfs(two_iteration_calchome, out_dir, species)
+    assert list((out_dir / "campaign").iterdir()) == keyed
+
+    # A newly finished iteration changes the key; the stale dir is pruned.
+    progress = run_layout.load_progress(two_iteration_calchome)
+    ctx = campaign_context(two_iteration_calchome, progress, range(2), species)
+    grown = campaign_context(
+        two_iteration_calchome, progress, range(2), species
+    )
+    grown.uncertainty_trajectories[2] = tmp_path / "it2.extxyz"
+    assert cli._summary_cache_key(ctx) == keyed[0].name
+    assert cli._summary_cache_key(grown) != keyed[0].name
+    (keyed[0].parent / "deadbeef0000").mkdir()
+    datapath = cli._summary_datapath(out_dir, grown)
+    assert not keyed[0].exists()
+    assert not (keyed[0].parent / "deadbeef0000").exists()
+    assert datapath.name == cli._summary_cache_key(grown)
+
+
 def test_main_writes_merged_pdf(tmp_path, two_iteration_calchome):
     output = tmp_path / "dashboard.pdf"
     rc = cli.main([str(two_iteration_calchome), "--output", str(output)])
