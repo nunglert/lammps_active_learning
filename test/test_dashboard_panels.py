@@ -9,6 +9,7 @@ directly off synthetic sampler trajectories.
 """
 
 import json
+from pathlib import Path
 
 import numpy as np
 import pytest
@@ -27,6 +28,9 @@ from alviz.dashboard import Dashboard  # noqa: E402
 from lammps_al.dashboard.panels.committee_parity import (  # noqa: E402
     CommitteeParityPanel,
     HeldOutParityPanel,
+)
+from lammps_al.dashboard.panels.cross_iteration import (  # noqa: E402
+    CrossIterationErrorPanel,
 )
 from lammps_al.dashboard.panels.error_analysis import (  # noqa: E402
     ErrorVsROIDistancePanel,
@@ -384,6 +388,64 @@ def test_uncertainty_timeline_panel_locates_rois(tmp_path):
     assert panel.data.mean == pytest.approx([0.2, 0.6])
     assert panel.data.roi_step == [50.0]
     assert panel.data.roi_uncertainty == pytest.approx([0.9])
+
+
+# ---------------------------------------------------------------------------
+# CrossIterationErrorPanel
+# ---------------------------------------------------------------------------
+def test_cross_iteration_error_panel_matrix(monkeypatch, tmp_path):
+    rng = np.random.default_rng(5)
+    initial = tmp_path / "initial.xyz"
+    ase_io.write(initial, [_make_config(rng, e_ref=-1.0) for _ in range(4)])
+    it1 = [_make_config(rng, e_ref=-2.0) for _ in range(2)]
+    it2_new = [_make_config(rng, e_ref=-3.0)]
+    path1 = tmp_path / "evaluator_it1_0.extxyz"
+    path2 = tmp_path / "evaluator_it2_0.extxyz"
+    ase_io.write(path1, it1)
+    # Cumulative output: only the trailing frame is new to iteration 2.
+    ase_io.write(path2, it1 + it2_new)
+
+    def fake(model_files, atoms_list, **kwargs):
+        # Committee "itN" is off by N+1 meV/atom in energy, (N+1)*0.01 in
+        # every force component.
+        k = int(Path(model_files[0]).stem[-1]) + 1
+        energies = [
+            float(a.info["REF_energy"]) + 1e-3 * k * len(a) for a in atoms_list
+        ]
+        forces = [
+            np.asarray(a.arrays["REF_forces"]) + 0.01 * k for a in atoms_list
+        ]
+        return energies, forces
+
+    monkeypatch.setattr(
+        "lammps_al.dashboard.panels.cross_iteration.score_with_committee",
+        fake,
+    )
+    panel = CrossIterationErrorPanel(
+        {0: ["m_it0.yaml"], 1: ["m_it1.yaml"], 2: ["m_it2.yaml"]},
+        {1: [path1], 2: [path2]},
+        initial_database=initial,
+        max_initial_frames=3,
+        datapath=tmp_path,
+    )
+    _render(panel)
+
+    d = panel.data
+    assert d.model_iterations == [0, 1, 2]
+    assert d.block_labels == ["init", "it1", "it2"]
+    assert d.block_iterations == [0, 1, 2]
+    assert d.block_sizes == [3, 2, 1]
+    for r, k in enumerate((1, 2, 3)):
+        assert d.e_rmse[r] == pytest.approx([k] * 3)
+        assert d.f_rmse[r] == pytest.approx([0.01 * k] * 3)
+
+
+def test_cross_iteration_error_panel_no_data_raises(tmp_path):
+    panel = CrossIterationErrorPanel(
+        {0: ["m.yaml"]}, {}, initial_database=None, datapath=tmp_path
+    )
+    with pytest.raises(ValueError):
+        panel.compute_data({})
 
 
 # ---------------------------------------------------------------------------

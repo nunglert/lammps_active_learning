@@ -74,6 +74,10 @@ def _patch_committee_scoring(monkeypatch):
         "lammps_al.dashboard.panels.species_parity.score_with_committee",
         _fake_score_with_committee,
     )
+    monkeypatch.setattr(
+        "lammps_al.dashboard.panels.cross_iteration.score_with_committee",
+        _fake_score_with_committee,
+    )
 
 
 @pytest.fixture
@@ -289,6 +293,7 @@ def test_default_specs_gate_on_view_and_inputs(
     )
     assert _names(assemble(summary, datapath=tmp_path)) == [
         "pipeline_attrition",
+        "cross_iteration_errors",
         "uncertainty_trend",
         "uncertainty_depth_profile",
     ]

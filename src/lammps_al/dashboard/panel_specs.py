@@ -57,6 +57,7 @@ def default_specs() -> list:
         make_spec("uncertainty_calibration"),
         make_spec("error_vs_roi_distance"),
         make_spec("pipeline_attrition"),
+        make_spec("cross_iteration_errors"),
         make_spec("uncertainty_trend"),
         make_spec("uncertainty_depth_profile"),
     ]
