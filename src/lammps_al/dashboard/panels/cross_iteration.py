@@ -22,6 +22,11 @@ each config is counted once. Model ``m`` has been trained on block ``d``
 iff ``d <= m`` (``init`` counting as iteration 0) -- pacemaker's own
 held-out ``test_size`` split still hides a few of those frames, so
 "in-sample" here is approximate.
+
+Each matrix is shown as both RMSE and MAE: a few badly-fit configs (or
+outlier reference labels) dominate the RMSE, while the MAE reflects the
+typical error, so a cell that is high in RMSE but low in MAE points at
+outliers rather than a uniformly poor fit.
 """
 
 from __future__ import annotations
@@ -43,7 +48,7 @@ logger = logging.getLogger(__name__)
 
 
 class CrossIterationErrorData(PanelData):
-    """Model x data-block RMSE matrices (rows: models, cols: blocks)."""
+    """Model x data-block error matrices (rows: models, cols: blocks)."""
 
     model_iterations: list[int]
     block_labels: list[str]
@@ -52,6 +57,10 @@ class CrossIterationErrorData(PanelData):
     block_sizes: list[int]
     e_rmse: list[list[Optional[float]]]  # meV/atom
     f_rmse: list[list[Optional[float]]]  # eV/Å, per component
+    # ``None`` only in caches written before MAEs were recorded; such a
+    # cache is recomputed on load (see ``get_data``).
+    e_mae: Optional[list[list[Optional[float]]]] = None  # meV/atom
+    f_mae: Optional[list[list[Optional[float]]]] = None  # eV/Å, per component
 
 
 def _data_blocks(initial_frames, config_files_per_iteration) -> list:
@@ -72,11 +81,15 @@ def _data_blocks(initial_frames, config_files_per_iteration) -> list:
     return blocks
 
 
-def _block_rmse(atoms_list, energies, forces):
-    e_err = [
-        (e - float(a.info["REF_energy"])) / len(a)
-        for a, e in zip(atoms_list, energies)
-    ]
+def _block_errors(atoms_list, energies, forces):
+    """``(e_rmse, f_rmse, e_mae, f_mae)`` of one block; energies in
+    meV/atom, forces in eV/Å per component."""
+    e_err = np.asarray(
+        [
+            (e - float(a.info["REF_energy"])) / len(a)
+            for a, e in zip(atoms_list, energies)
+        ]
+    )
     f_err = np.concatenate(
         [
             (np.asarray(f) - np.asarray(a.arrays["REF_forces"])).ravel()
@@ -86,11 +99,14 @@ def _block_rmse(atoms_list, energies, forces):
     return (
         1e3 * float(np.sqrt(np.mean(np.square(e_err)))),
         float(np.sqrt(np.mean(np.square(f_err)))),
+        1e3 * float(np.mean(np.abs(e_err))),
+        float(np.mean(np.abs(f_err))),
     )
 
 
 class CrossIterationErrorPanel(Entry):
-    """Energy/force RMSE of each iteration's committee on each data block.
+    """Energy/force RMSE and MAE of each iteration's committee on each
+    data block.
 
     Every committee scores every block in one pass (one calculator build
     per committee), so the cost is ``n_models x total frames`` -- cap the
@@ -109,6 +125,7 @@ class CrossIterationErrorPanel(Entry):
     name = "cross_iteration_errors"
     data_class = CrossIterationErrorData
     colspan = 2
+    rowspan = 2
 
     def __init__(
         self,
@@ -137,9 +154,17 @@ class CrossIterationErrorPanel(Entry):
 
     def allocate_panels(self, fig):
         self._fig = fig
-        gs = self.subspec.subgridspec(1, 2, wspace=0.35)
-        self.ax_e = fig.add_subplot(gs[0])
-        self.ax_f = fig.add_subplot(gs[1])
+        gs = self.subspec.subgridspec(2, 2, wspace=0.35, hspace=0.45)
+        self.ax_e = fig.add_subplot(gs[0, 0])
+        self.ax_f = fig.add_subplot(gs[0, 1])
+        self.ax_e_mae = fig.add_subplot(gs[1, 0])
+        self.ax_f_mae = fig.add_subplot(gs[1, 1])
+
+    def get_data(self, shared_ressources, force_recompute) -> None:
+        super().get_data(shared_ressources, force_recompute)
+        if self.data.e_mae is None:
+            logger.info("Cached %s has no MAEs; recomputing.", self.name)
+            super().get_data(shared_ressources, True)
 
     def _initial_frames(self) -> list:
         if self._initial_database is None:
@@ -166,7 +191,7 @@ class CrossIterationErrorPanel(Entry):
 
         all_frames = [a for _, _, frames in blocks for a in frames]
         bounds = np.cumsum([0] + [len(frames) for _, _, frames in blocks])
-        e_rmse, f_rmse = [], []
+        e_rmse, f_rmse, e_mae, f_mae = [], [], [], []
         for it, model_files in self._model_files.items():
             logger.info(
                 "Scoring iteration %d's committee on %d frame(s) in %d "
@@ -176,13 +201,12 @@ class CrossIterationErrorPanel(Entry):
                 len(blocks),
             )
             energies, forces = score_with_committee(model_files, all_frames)
-            row_e, row_f = [], []
-            for (_, _, frames), lo, hi in zip(blocks, bounds, bounds[1:]):
-                e, f = _block_rmse(frames, energies[lo:hi], forces[lo:hi])
-                row_e.append(e)
-                row_f.append(f)
-            e_rmse.append(row_e)
-            f_rmse.append(row_f)
+            rows = [
+                _block_errors(frames, energies[lo:hi], forces[lo:hi])
+                for (_, _, frames), lo, hi in zip(blocks, bounds, bounds[1:])
+            ]
+            for out, values in zip((e_rmse, f_rmse, e_mae, f_mae), zip(*rows)):
+                out.append(list(values))
 
         return CrossIterationErrorData(
             model_iterations=list(self._model_files),
@@ -191,6 +215,8 @@ class CrossIterationErrorPanel(Entry):
             block_sizes=[len(frames) for _, _, frames in blocks],
             e_rmse=e_rmse,
             f_rmse=f_rmse,
+            e_mae=e_mae,
+            f_mae=f_mae,
         )
 
     def _heatmap(self, ax, matrix, title):
@@ -238,6 +264,8 @@ class CrossIterationErrorPanel(Entry):
     def plot_data(self):
         self._heatmap(self.ax_e, self.data.e_rmse, "energy RMSE (meV/atom)")
         self._heatmap(self.ax_f, self.data.f_rmse, "force RMSE (eV/Å)")
+        self._heatmap(self.ax_e_mae, self.data.e_mae, "energy MAE (meV/atom)")
+        self._heatmap(self.ax_f_mae, self.data.f_mae, "force MAE (eV/Å)")
 
 
 class CrossIterationErrorSpec(PanelSpec):

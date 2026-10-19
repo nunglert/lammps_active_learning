@@ -438,6 +438,43 @@ def test_cross_iteration_error_panel_matrix(monkeypatch, tmp_path):
     for r, k in enumerate((1, 2, 3)):
         assert d.e_rmse[r] == pytest.approx([k] * 3)
         assert d.f_rmse[r] == pytest.approx([0.01 * k] * 3)
+        # Constant offsets: MAE equals RMSE.
+        assert d.e_mae[r] == pytest.approx([k] * 3)
+        assert d.f_mae[r] == pytest.approx([0.01 * k] * 3)
+
+
+def test_cross_iteration_error_panel_recomputes_cache_without_mae(
+    monkeypatch, tmp_path
+):
+    rng = np.random.default_rng(6)
+    path = tmp_path / "evaluator_it1_0.extxyz"
+    ase_io.write(path, [_make_config(rng, e_ref=-2.0) for _ in range(2)])
+    stale = {
+        "model_iterations": [1],
+        "block_labels": ["it1"],
+        "block_iterations": [1],
+        "block_sizes": [2],
+        "e_rmse": [[99.0]],
+        "f_rmse": [[99.0]],
+    }
+    (tmp_path / "cross_iteration_errors.json").write_text(json.dumps(stale))
+    monkeypatch.setattr(
+        "lammps_al.dashboard.panels.cross_iteration.score_with_committee",
+        lambda model_files, atoms_list, **kw: (
+            [float(a.info["REF_energy"]) for a in atoms_list],
+            [np.asarray(a.arrays["REF_forces"]) for a in atoms_list],
+        ),
+    )
+    panel = CrossIterationErrorPanel(
+        {1: ["m_it1.yaml"]},
+        {1: [path]},
+        initial_database=None,
+        datapath=tmp_path,
+    )
+    _render(panel)
+
+    assert panel.data.e_rmse == [[pytest.approx(0.0)]]
+    assert panel.data.e_mae == [[pytest.approx(0.0)]]
 
 
 def test_cross_iteration_error_panel_no_data_raises(tmp_path):
