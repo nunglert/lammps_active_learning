@@ -74,6 +74,12 @@ dashboard = [
     # The CLI's dashboard.yaml config (lammps_al.dashboard.cli).
     "pyyaml",
 ]
+# DFT-D3 for lammps_al.label.VaspD3Evaluator's payload (simple-dft-d3's
+# Python API, prebuilt manylinux wheels; only cffi + numpy). Needed in the
+# cluster env that runs the VASP jobs, not on the driver.
+label = [
+    "dftd3>=1.0",
+]
 dev = [
     "pytest",
     "pytest-cov",
@@ -83,7 +89,7 @@ dev = [
 # [ace_tensorpot_gpu], which needs its own dedicated environment and would
 # conflict with [grace] here (see that extra's comment above).
 all = [
-    "lammps_active_learning[dev,run,ace,grace,mace,embedding,dashboard]"
+    "lammps_active_learning[dev,run,ace,grace,mace,embedding,dashboard,label]"
 ]
 
 [project.scripts]
