@@ -409,6 +409,7 @@ def _install_fake_ace_tensorpotential_stack(monkeypatch, member_forces):
 
     def _fake_neighbour_list(quantities, atoms, cutoff):
         assert quantities in ("ijS", "ij")
+        neighbours.calls.append((quantities, cutoff))
         n = len(atoms)
         i, j = np.meshgrid(np.arange(n), np.arange(n), indexing="ij")
         mask = i != j
@@ -420,11 +421,66 @@ def _install_fake_ace_tensorpotential_stack(monkeypatch, member_forces):
         return ind_i, ind_j, offsets
 
     neighbours.neighbour_list = _fake_neighbour_list
+    neighbours.calls = []
     matscipy_module.neighbours = neighbours
     monkeypatch.setitem(sys.modules, "matscipy", matscipy_module)
     monkeypatch.setitem(sys.modules, "matscipy.neighbours", neighbours)
 
     return gpu_config_calls
+
+
+def _write_ace_potential(path, rcuts):
+    """Minimal stand-in for a pacemaker potential file: only the
+    per-block ``rcutij`` lines matter to ``_ace_model_cutoff``."""
+    blocks = [
+        f"  - speciesblock: Cu H\n    rcutij: {r}\n    r_in: 0\n"
+        for r in rcuts
+    ]
+    path.write_text("species:\n" + "".join(blocks))
+    return path
+
+
+def test_ace_model_cutoff_is_largest_rcutij(tmp_path):
+    files = [
+        _write_ace_potential(tmp_path / "m0.yaml", rcuts=[5.0, 6.5]),
+        _write_ace_potential(tmp_path / "m1.yaml", rcuts=[7.0, 4.0]),
+    ]
+
+    assert payload._ace_model_cutoff(files) == 7.0
+
+
+def test_ace_model_cutoff_without_rcutij_raises(tmp_path):
+    path = tmp_path / "m.yaml"
+    path.write_text("species:\n  - speciesblock: Cu\n")
+
+    with pytest.raises(ValueError, match="No rcutij"):
+        payload._ace_model_cutoff([path])
+
+
+def test_tp_atoms_offsets_match_wrapped_positions():
+    """Pair vectors rebuilt from ``_positions``/``_offsets`` equal the true
+    minimum-image vectors, also for atoms given outside the cell (as an
+    unwrapped LAMMPS dump has them)."""
+    pytest.importorskip("matscipy")
+    rng = np.random.default_rng(0)
+    cell = np.diag([8.0, 9.0, 10.0])
+    positions = rng.uniform(0, 1, (30, 3)) @ cell
+    positions[:5] += cell[0] * 1  # outside the cell along +x
+    positions[5:10] -= cell[1] * 2  # two cells away along -y
+    atoms = Atoms("Cu30", positions=positions, cell=cell, pbc=True)
+
+    tp_atoms = payload._tp_atoms_from_matscipy(atoms, cutoff=3.5)
+
+    cart = tp_atoms["_positions"] @ cell
+    i, j = tp_atoms["_ind_i"], tp_atoms["_ind_j"]
+    vec = cart[j] - cart[i] + tp_atoms["_offsets"] @ cell
+    expected = np.array(
+        [atoms.get_distance(a, b, mic=True) for a, b in zip(i, j)]
+    )
+    assert len(i) > 0
+    np.testing.assert_allclose(np.linalg.norm(vec, axis=1), expected)
+    # The caller's atoms are left as given.
+    np.testing.assert_allclose(atoms.positions, positions)
 
 
 def test_build_ace_tensorpotential_models_one_per_file_and_gpu_index(
@@ -496,9 +552,7 @@ def test_ace_committee_force_stdev_matches_manual_std(monkeypatch):
         "H2", positions=[[0, 0, 0], [1, 0, 0]], cell=[9, 9, 9], pbc=True
     )
 
-    stdev = payload._ace_committee_force_stdev(
-        models, atoms, cutoff_radius=4.0
-    )
+    stdev = payload._ace_committee_force_stdev(models, atoms, model_cutoff=4.0)
 
     expected = np.std(np.stack([forces_a, forces_b]), axis=0, ddof=1)
     np.testing.assert_allclose(stdev, expected)
@@ -527,16 +581,26 @@ def test_annotate_uncertainties_ace_backend_uses_tensorpotential(
         tmp_path / "trajectory.extxyz", n_frames=3
     )
     output = tmp_path / "annotated.extxyz"
+    model_files = [
+        _write_ace_potential(tmp_path / f"member_{k}.yaml", rcuts=[6.0, 7.0])
+        for k in ("a", "b")
+    ]
 
     payload.annotate_uncertainties(
         trajectory_file=trajectory,
-        model_files=["member_a.yaml", "member_b.yaml"],
+        model_files=model_files,
         cutoff_radius=4.0,
         output_file=output,
         logger=logging.getLogger("test"),
         device="cpu",
         backend="ace",
     )
+
+    # The model's neighbor list uses the potential's own cutoff; only the
+    # aggregation uses cutoff_radius.
+    calls = sys.modules["matscipy.neighbours"].calls
+    assert {c for q, c in calls if q == "ijS"} == {7.0}
+    assert {c for q, c in calls if q == "ij"} == {4.0}
 
     annotated = ase.io.read(output, index=":")
     assert len(annotated) == 3

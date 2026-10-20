@@ -19,7 +19,7 @@ pair_coeff  * * O Sr Ti
 {% endif %}
 
 
-velocity    all create {{ temperature }} {{ seed }} dist gaussian rot yes mom yes sum yes
+velocity    all create {{ temperature }} {{ seed }} dist gaussian rot yes mom yes sum no
 
 thermo          100
 thermo_style    custom step temp etotal press

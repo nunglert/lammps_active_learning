@@ -27,7 +27,7 @@ mass        2       63.546
 mass        3       1.008
 mass        4       15.999
 
-velocity    all create 300 {{ seed }} dist gaussian rot yes mom yes sum yes
+velocity    all create 300 {{ seed }} dist gaussian rot yes mom yes sum no
 
 thermo          1
 thermo_style    custom step temp etotal press

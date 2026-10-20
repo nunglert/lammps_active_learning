@@ -61,6 +61,7 @@ import glob
 import logging
 import os
 import pathlib
+import re
 import sys
 import time
 import warnings
@@ -333,6 +334,30 @@ def _build_ace_tensorpotential_models(model_files: list, device: str) -> list:
     return models
 
 
+_RCUTIJ_LINE = re.compile(r"^\s*rcutij:\s*([-+0-9.eE]+)\s*$", re.MULTILINE)
+
+
+def _ace_model_cutoff(model_files: list) -> float:
+    """The neighbor-list cutoff an ACE committee needs: the largest
+    ``rcutij`` over every member's pacemaker potential file.
+
+    This is the potential's own interaction range, unrelated to the
+    uncertainty-aggregation radius (``cutoff_radius``) -- building the
+    model's neighbor list with a smaller radius silently truncates every
+    atom's environment and corrupts the committee forces.
+
+    Raises:
+        ValueError: If a file records no ``rcutij`` at all.
+    """
+    cutoffs = []
+    for model_file in model_files:
+        values = _RCUTIJ_LINE.findall(Path(model_file).read_text())
+        if not values:
+            raise ValueError(f"No rcutij found in ACE potential {model_file}")
+        cutoffs.append(max(float(v) for v in values))
+    return max(cutoffs)
+
+
 def _tp_atoms_from_matscipy(atoms, cutoff: float) -> dict:
     """Build one frame's neighbor-list data in the shape
     ``tensorpotential.utils.utilities.supply_batch``/``TensorPotential.
@@ -354,9 +379,17 @@ def _tp_atoms_from_matscipy(atoms, cutoff: float) -> dict:
     ``cell_map``/``e_map`` -- see ``tensorpotential.tensorpot.
     TensorPotential._evaluate``'s ``input_signature``); pure inference, not
     fitting.
+
+    Works on a wrapped copy: ``_positions`` are scaled positions inside the
+    cell, so the shift vectors must be computed for those same wrapped
+    positions. Offsets taken from unwrapped positions (e.g. a LAMMPS
+    ``xu yu zu`` dump) put every pair involving an atom outside the cell
+    a lattice vector away, dropping it from that atom's environment.
     """
     from matscipy.neighbours import neighbour_list
 
+    atoms = atoms.copy()
+    atoms.wrap()
     at_nums = atoms.get_atomic_numbers()
     ind_i, ind_j, offsets = neighbour_list("ijS", atoms, cutoff)
     return {
@@ -375,7 +408,7 @@ def _tp_atoms_from_matscipy(atoms, cutoff: float) -> dict:
 
 
 def _ace_committee_force_stdev(
-    models: list, atoms, cutoff_radius: float
+    models: list, atoms, model_cutoff: float
 ) -> np.ndarray:
     """Per-atom, per-component force standard deviation across an ACE
     committee, via ``tensorpotential`` (GPU-capable) instead of ``pyace``
@@ -386,14 +419,15 @@ def _ace_committee_force_stdev(
         atoms: Structure to evaluate (not mutated -- unlike
             :func:`_committee_force_stdev`'s ASE-``Calculator`` path, this
             never attaches a calculator to ``atoms``).
-        cutoff_radius: Neighbor-list cutoff (Angstrom).
+        model_cutoff: The potentials' own neighbor-list cutoff (Angstrom),
+            see :func:`_ace_model_cutoff` -- not the aggregation radius.
 
     Returns:
         Force standard deviation, shape ``(n_atoms, 3)``.
     """
     from tensorpotential.utils.utilities import supply_batch
 
-    tp_atoms = _tp_atoms_from_matscipy(atoms, cutoff_radius)
+    tp_atoms = _tp_atoms_from_matscipy(atoms, model_cutoff)
     batch = supply_batch([tp_atoms])
     forces = []
     for tp in models:
@@ -447,13 +481,20 @@ def annotate_uncertainties(
 
     if backend == "ace":
         models = _build_ace_tensorpotential_models(model_files, device)
+        model_cutoff = _ace_model_cutoff(model_files)
+        logger.info(
+            "ACE committee neighbor-list cutoff: %.2f A (aggregation "
+            "radius: %.2f A)",
+            model_cutoff,
+            cutoff_radius,
+        )
     else:
         model_calc = _build_committee_calculator(backend, model_files, device)
 
     start = time.monotonic()
     for i, atoms in enumerate(structs):
         if backend == "ace":
-            stdev = _ace_committee_force_stdev(models, atoms, cutoff_radius)
+            stdev = _ace_committee_force_stdev(models, atoms, model_cutoff)
         else:
             a = atoms.copy()
             stdev = _committee_force_stdev(backend, a, model_calc)
