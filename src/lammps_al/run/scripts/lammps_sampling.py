@@ -391,6 +391,9 @@ def main(argv: Optional[list] = None) -> None:
         # matters (an unthinned dump can reach tens of GB in minutes on a
         # large system).
         dump_frequency=input_config.dump_frequency or 1,
+        # Literal, not lammps_al.run.inputs.FINAL_DATA_NAME: this payload
+        # imports the *cluster* env's lammps_al, which may predate that
+        # constant. test_sampler.py checks the two agree.
         final_data_file=outpath / "surface_final.data",
         do_return_path=True,
         trj_file_key="dump_file",

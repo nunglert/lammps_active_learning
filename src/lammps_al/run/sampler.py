@@ -75,6 +75,7 @@ from remote_handler.core.tasks import SingleScriptTask
 from remote_handler.exceptions import WorkflowError
 from remote_handler.workflows.active_learning_base import Sampler
 
+from lammps_al.run.inputs import FINAL_DATA_NAME
 from lammps_al.run.scripts import script_dir
 
 logger = logging.getLogger(__name__)
@@ -161,6 +162,13 @@ class LammpsSampler(Sampler):
             systems, but for large ones (hundreds of thousands of atoms)
             this can produce a huge dump file in minutes; set explicitly for
             those.
+        continue_from_previous: Start each iteration's MD from the final
+            frame of the most recent earlier iteration's run (the
+            template's ``write_data {{ final_data_file }}`` output, collected
+            under ``<iteration>/sample/results/out/``) instead of always
+            restarting from ``data_path``. Falls back to ``data_path`` when
+            no earlier iteration has one (e.g. the first sampling
+            iteration). An explicit ``struct`` schedule kwarg still wins.
         stub: Dry-run without a cluster; emit a mock trajectory for testing
     """
 
@@ -181,6 +189,7 @@ class LammpsSampler(Sampler):
         stub: bool = False,
         cluster_config: Optional[ClusterConfig] = None,
         dump_frequency: Optional[int] = None,
+        continue_from_previous: bool = False,
     ):
         super().__init__()
         if sampling_script is None:
@@ -189,6 +198,8 @@ class LammpsSampler(Sampler):
         self.sampling_script = sampling_script
         self.template_path = template_path
         self.data_path = data_path
+        self.initial_data_path = data_path
+        self.continue_from_previous = continue_from_previous
         self.element_mapping = element_mapping
         self.dump_frequency = dump_frequency
         self.remote_lammps_executable_path = remote_lammps_executable_path
@@ -250,6 +261,8 @@ class LammpsSampler(Sampler):
 
         if "struct" in kwargs:
             self.data_path = kwargs["struct"]
+        elif self.continue_from_previous:
+            self.data_path = self._previous_final_data(calcdir)
 
         # In stub mode we don't stage a remote task.
         if self.stub:
@@ -295,6 +308,44 @@ class LammpsSampler(Sampler):
         self.sampling_task.copy_file(self.data_path)
         for p in self.model_files:
             self.sampling_task.copy_file(p)
+
+    def _previous_final_data(self, calcdir: Path) -> os.PathLike:
+        """The final-frame data file of the most recent earlier iteration
+        (sibling calcdirs named by iteration number), or ``data_path`` if
+        there is none."""
+        calcdir = Path(calcdir)
+        if not calcdir.name.isdigit():
+            return self.initial_data_path
+        current = int(calcdir.name)
+        earlier = sorted(
+            (
+                int(d.name)
+                for d in calcdir.parent.iterdir()
+                if d.is_dir() and d.name.isdigit() and int(d.name) < current
+            ),
+            reverse=True,
+        )
+        for iteration in earlier:
+            path = (
+                calcdir.parent
+                / str(iteration)
+                / "sample"
+                / "results"
+                / "out"
+                / FINAL_DATA_NAME
+            )
+            if path.is_file():
+                logger.info(
+                    "Continuing MD from iteration %d's final frame: %s",
+                    iteration,
+                    path,
+                )
+                return path
+        logger.info(
+            "No earlier iteration's final frame found; starting MD from %s",
+            self.initial_data_path,
+        )
+        return self.initial_data_path
 
     def _create_stub_outputs(self, num_frames: int = 10) -> list[Atoms]:
         """Create a mock LAMMPS trajectory for testing.

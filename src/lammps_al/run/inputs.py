@@ -22,6 +22,11 @@ from typing import ClassVar, Optional
 from remote_handler.exceptions import ScriptInputError
 from remote_handler.scripts.input_models import ScriptInput, _require_path
 
+# The payload's end-of-run ``write_data`` output, under ``<calcpath>/out/``;
+# ``LammpsSampler(continue_from_previous=True)`` starts the next iteration's
+# MD from it.
+FINAL_DATA_NAME = "surface_final.data"
+
 
 @dataclass
 class LammpsSamplingInput(ScriptInput):

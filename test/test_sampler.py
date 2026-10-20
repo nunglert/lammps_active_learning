@@ -155,6 +155,79 @@ def test_update_known_kwarg_overrides_top_level_field(
     assert "dump_frequency" not in script_input["extra_template_kwargs"]
 
 
+def _write_final_data(calchome, iteration):
+    out = calchome / str(iteration) / "sample" / "results" / "out"
+    out.mkdir(parents=True)
+    path = out / "surface_final.data"
+    path.write_text("final frame\n")
+    return path
+
+
+def test_continue_from_previous_uses_latest_earlier_final_frame(
+    mock_remote_fs, mock_model_files, tmp_path, monkeypatch
+):
+    calchome = tmp_path / "calchome"
+    _write_final_data(calchome, 1)
+    latest = _write_final_data(calchome, 2)
+    _write_final_data(calchome, 4)  # later than the current iteration
+    s = _sampler(
+        mock_remote_fs, tmp_path, continue_from_previous=True, stub=False
+    )
+    created = _patch_single_script_task(monkeypatch)
+
+    s.update(calchome / "3", mock_model_files)
+
+    assert s.data_path == latest
+    script_input = json.loads(Path(created["input_file"]).read_text())
+    assert script_input["data_file"] == "surface_final.data"
+
+
+def test_continue_from_previous_falls_back_to_data_path(
+    mock_remote_fs, mock_model_files, tmp_path
+):
+    calchome = tmp_path / "calchome"
+    (calchome / "0").mkdir(parents=True)  # e.g. the bootstrap-train iteration
+    s = _sampler(mock_remote_fs, tmp_path, continue_from_previous=True)
+    initial = s.data_path
+
+    s.update(calchome / "1", mock_model_files)
+
+    assert s.data_path == initial
+
+
+def test_continue_from_previous_off_by_default(
+    mock_remote_fs, mock_model_files, tmp_path
+):
+    calchome = tmp_path / "calchome"
+    _write_final_data(calchome, 1)
+    s = _sampler(mock_remote_fs, tmp_path)
+    initial = s.data_path
+
+    s.update(calchome / "2", mock_model_files)
+
+    assert s.data_path == initial
+
+
+def test_struct_kwarg_wins_over_continue_from_previous(
+    mock_remote_fs, mock_model_files, tmp_path
+):
+    calchome = tmp_path / "calchome"
+    _write_final_data(calchome, 1)
+    explicit = tmp_path / "explicit.data"
+    s = _sampler(mock_remote_fs, tmp_path, continue_from_previous=True)
+
+    s.update(calchome / "2", mock_model_files, struct=explicit)
+
+    assert s.data_path == explicit
+
+
+def test_payload_writes_the_final_data_name_the_sampler_reads():
+    from lammps_al.run.inputs import FINAL_DATA_NAME
+
+    payload = (script_dir() / "lammps_sampling.py").read_text()
+    assert f'outpath / "{FINAL_DATA_NAME}"' in payload
+
+
 def test_init_lammps_sampler(mock_remote_fs, tmp_path):
     """Constructor stores the sampling parameters."""
     s = _sampler(
