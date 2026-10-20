@@ -8,6 +8,7 @@ fake ``pyace`` module installed into ``sys.modules`` -- the same technique
 dispatch, reused here rather than reinvented.
 """
 
+import json
 import sys
 import types
 
@@ -18,6 +19,7 @@ from ase.calculators.calculator import Calculator
 
 from lammps_al.dashboard.committee_eval import (
     _default_committee_calculator,
+    read_reference_energies,
     score_with_committee,
 )
 
@@ -90,6 +92,54 @@ def test_score_with_committee_multiple_configs():
     assert energies == [1.0, 1.0]
     assert forces[0].shape == (2, 3)
     assert forces[1].shape == (3, 3)
+
+
+def _write_potential(path, reference_energy=None):
+    lines = ["metadata:", "  pacemaker_version: 0.2.7"]
+    if reference_energy is not None:
+        # pacemaker's own format: a JSON string, YAML double-quoted.
+        encoded = json.dumps(json.dumps(reference_energy))
+        lines.append(f"  reference_energy: {encoded}")
+    lines += ["  user: someone", "global:", "  reference_energy: 99", ""]
+    path.write_text("\n".join(lines))
+    return path
+
+
+def test_read_reference_energies_from_metadata(tmp_path):
+    ref = {"H": -0.18, "O": -0.09, "Cu": -0.036}
+    files = [_write_potential(tmp_path / f"m{i}.yaml", ref) for i in range(2)]
+
+    assert read_reference_energies(files) == pytest.approx(ref)
+
+
+def test_read_reference_energies_absent(tmp_path):
+    files = [_write_potential(tmp_path / "m.yaml"), tmp_path / "gone.yaml"]
+
+    assert read_reference_energies(files) == {}
+
+
+def test_read_reference_energies_disagreeing_members_raise(tmp_path):
+    files = [
+        _write_potential(tmp_path / "m0.yaml", {"H": -0.18}),
+        _write_potential(tmp_path / "m1.yaml", {"H": -0.20}),
+    ]
+
+    with pytest.raises(ValueError, match="different reference energies"):
+        read_reference_energies(files)
+
+
+def test_score_with_committee_adds_reference_energy(tmp_path):
+    model = _write_potential(tmp_path / "m.yaml", {"H": -0.5, "O": -2.0})
+    atoms_list = [
+        Atoms("H2O", positions=[[0, 0, 0], [0, 0, 1], [0, 1, 0]]),
+    ]
+
+    energies, _ = score_with_committee(
+        [model], atoms_list, _build_calculator=_seam
+    )
+
+    # Fake calculator's 1.0 plus 2 * (-0.5) + (-2.0).
+    assert energies == [pytest.approx(-2.0)]
 
 
 # ---------------------------------------------------------------------------

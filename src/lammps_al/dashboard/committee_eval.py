@@ -10,11 +10,20 @@ that member's split.) ``pyace.PyACEEnsembleCalculator`` already does exactly
 this, and ``lammps_al``'s own committee-selection payload already builds one
 via ``_build_committee_calculator`` for uncertainty scoring -- this module
 reuses that directly rather than inventing a second pyace-loading path.
+
+pacemaker fits ``energy_corrected`` -- the reference energy minus a
+per-element ``reference_energy`` shift -- and the potential predicts on that
+scale, so raw committee energies sit a composition-dependent constant away
+from ``REF_energy``. :func:`score_with_committee` adds the shift back (read
+from the potential's own metadata, see :func:`read_reference_energies`) so
+its energies compare directly against ``REF_energy``.
 """
 
 from __future__ import annotations
 
+import json
 import logging
+import re
 import time
 from pathlib import Path
 
@@ -48,6 +57,53 @@ def _default_committee_calculator(model_files, device: str = "cpu"):
         "Committee calculator built in %.1fs.", time.monotonic() - start
     )
     return calc
+
+
+_REFERENCE_ENERGY_LINE = re.compile(r"^\s+reference_energy:\s*(.+?)\s*$")
+
+
+def _read_reference_energy(path: Path) -> dict:
+    """``{element: eV}`` from one potential's ``metadata`` block, or ``{}``
+    if the file or the key is absent.
+
+    Only the leading ``metadata:`` block is scanned (the rest of a potential
+    can be large); pacemaker stores the value as a JSON string.
+    """
+    if not path.is_file():
+        return {}
+    with open(path) as f:
+        if f.readline().strip() != "metadata:":
+            return {}
+        for line in f:
+            if line.strip() and not line[0].isspace():
+                break  # end of the metadata block
+            match = _REFERENCE_ENERGY_LINE.match(line)
+            if match:
+                value = match.group(1)
+                if value.startswith('"'):
+                    value = json.loads(value)  # YAML double-quoted string
+                elif value.startswith("'"):
+                    value = value[1:-1].replace("''", "'")
+                return {k: float(v) for k, v in json.loads(value).items()}
+    return {}
+
+
+def read_reference_energies(model_files) -> dict:
+    """The per-element ``reference_energy`` shift the committee was fit
+    with (``{}`` when the potentials record none).
+
+    Raises:
+        ValueError: If committee members record different shifts -- their
+            energies would then not share one scale.
+    """
+    shifts = {Path(p): _read_reference_energy(Path(p)) for p in model_files}
+    distinct = {tuple(sorted(s.items())) for s in shifts.values()}
+    if len(distinct) > 1:
+        raise ValueError(
+            "Committee members record different reference energies: "
+            + ", ".join(f"{p.name}={s}" for p, s in shifts.items())
+        )
+    return dict(distinct.pop()) if distinct else {}
 
 
 def read_pacemaker_metrics(calcdir, *, split: str = "train"):
@@ -145,10 +201,19 @@ def score_with_committee(
 
     Returns:
         ``(energies, forces)``: ``energies`` a list of per-config total
-        energies (eV, not per-atom); ``forces`` a list of ``(n_atoms, 3)``
-        arrays, or ``None`` when ``want_forces`` is False.
+        energies (eV, not per-atom) on the ``REF_energy`` scale, i.e. with
+        the potentials' ``reference_energy`` shift added back; ``forces`` a
+        list of ``(n_atoms, 3)`` arrays, or ``None`` when ``want_forces``
+        is False.
     """
     model_files = [Path(p) for p in model_files]
+    reference_energy = read_reference_energies(model_files)
+    if reference_energy:
+        logger.info(
+            "Adding the potentials' per-element reference energies back to "
+            "predicted energies: %s",
+            reference_energy,
+        )
     calc = _build_calculator(model_files, device)
 
     logger.info(
@@ -163,7 +228,10 @@ def score_with_committee(
     for atoms in atoms_list:
         scored = atoms.copy()
         scored.calc = calc
-        energies.append(float(scored.get_potential_energy()))
+        shift = sum(
+            reference_energy.get(s, 0.0) for s in scored.get_chemical_symbols()
+        )
+        energies.append(float(scored.get_potential_energy()) + shift)
         if want_forces:
             forces.append(np.asarray(scored.get_forces(), dtype=float))
     elapsed = time.monotonic() - start
