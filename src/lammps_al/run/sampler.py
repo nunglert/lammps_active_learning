@@ -101,8 +101,6 @@ _KNOWN_SCRIPT_INPUT_KEYS = {
     "backend",
     "element_mapping",
     "dump_frequency",
-    "max_restarts",
-    "restart_frequency",
 }
 
 
@@ -164,13 +162,6 @@ class LammpsSampler(Sampler):
             systems, but for large ones (hundreds of thousands of atoms)
             this can produce a huge dump file in minutes; set explicitly for
             those.
-        max_restarts: Retries of a LAMMPS run that exits non-zero, e.g.
-            after a sporadic GPU fault (default 0). With
-            ``restart_frequency`` set and a template that supports it, a
-            retry resumes from the newest restart file instead of starting
-            over -- see ``lammps_sampling.py``'s module docstring.
-        restart_frequency: Steps between LAMMPS restart files, rendered
-            into the template as ``{{ restart_frequency }}``.
         continue_from_previous: Start each iteration's MD from the final
             frame of the most recent earlier iteration's run (the
             template's ``write_data {{ final_data_file }}`` output, collected
@@ -199,8 +190,6 @@ class LammpsSampler(Sampler):
         cluster_config: Optional[ClusterConfig] = None,
         dump_frequency: Optional[int] = None,
         continue_from_previous: bool = False,
-        max_restarts: int = 0,
-        restart_frequency: Optional[int] = None,
     ):
         super().__init__()
         if sampling_script is None:
@@ -213,8 +202,6 @@ class LammpsSampler(Sampler):
         self.continue_from_previous = continue_from_previous
         self.element_mapping = element_mapping
         self.dump_frequency = dump_frequency
-        self.max_restarts = max_restarts
-        self.restart_frequency = restart_frequency
         self.remote_lammps_executable_path = remote_lammps_executable_path
         self.lammps_args = lammps_args
         self.lammps_pair_style = lammps_pair_style
@@ -243,8 +230,6 @@ class LammpsSampler(Sampler):
             "backend": self.backend,
             "element_mapping": self.element_mapping,
             "dump_frequency": self.dump_frequency,
-            "max_restarts": self.max_restarts,
-            "restart_frequency": self.restart_frequency,
         }
 
     def update(

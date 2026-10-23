@@ -101,29 +101,6 @@ def _patch_single_script_task(monkeypatch):
     return created
 
 
-def test_update_forwards_restart_settings(
-    mock_remote_fs, mock_model_files, tmp_path, monkeypatch
-):
-    """max_restarts/restart_frequency are top-level script_input fields,
-    not extra_template_kwargs (which an older payload would still render
-    but never act on)."""
-    s = _sampler(
-        mock_remote_fs,
-        tmp_path,
-        max_restarts=3,
-        restart_frequency=500,
-        stub=False,
-    )
-    created = _patch_single_script_task(monkeypatch)
-
-    s.update(tmp_path / "calcdir", mock_model_files)
-
-    script_input = json.loads(Path(created["input_file"]).read_text())
-    assert script_input["max_restarts"] == 3
-    assert script_input["restart_frequency"] == 500
-    assert "max_restarts" not in script_input["extra_template_kwargs"]
-
-
 def test_update_keeps_dump_frequency(
     mock_remote_fs, mock_model_files, tmp_path, monkeypatch
 ):
