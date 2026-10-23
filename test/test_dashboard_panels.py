@@ -44,6 +44,7 @@ from lammps_al.dashboard.panels.species_parity import (  # noqa: E402
     SpeciesParityData,
 )
 from lammps_al.dashboard.panels.training_fit import (  # noqa: E402
+    TrainingConvergencePanel,
     TrainingParityPanel,
 )
 from lammps_al.dashboard.panels.uncertainty import (  # noqa: E402
@@ -723,3 +724,52 @@ def test_training_parity_panel_no_predictions_raises(tmp_path):
     )
     with pytest.raises(ValueError):
         panel.compute_data({})
+
+
+# ---------------------------------------------------------------------------
+# TrainingConvergencePanel
+# ---------------------------------------------------------------------------
+_METRICS_HEADER = "ladder_step cycle_step iter_num loss rmse_epa rmse_f_comp"
+
+
+def _write_metrics(calcdir, rows):
+    calcdir.mkdir(parents=True)
+    lines = [_METRICS_HEADER] + [" ".join(map(str, r)) for r in rows]
+    (calcdir / "metrics.txt").write_text("\n".join(lines) + "\n")
+
+
+def test_training_convergence_lays_ladder_steps_end_to_end(tmp_path):
+    # Two ladder steps; pacemaker restarts iter_num per step and repeats
+    # each step's last row.
+    _write_metrics(
+        tmp_path / "0",
+        [
+            (0, 0, 0, 1.0, 0.10, 1.0),
+            (0, 0, 10, 0.5, 0.05, 0.5),
+            (0, 0, 10, 0.5, 0.05, 0.5),
+            (1, 0, 0, 0.5, 0.05, 0.5),
+            (1, 0, 5, 0.2, 0.02, 0.2),
+        ],
+    )
+
+    data = TrainingConvergencePanel(
+        [tmp_path / "0"], datapath=tmp_path
+    ).compute_data({})
+
+    assert data.iter_num["0"] == [0, 10, 10, 15]
+    assert data.rmse_f_comp["0"] == [1.0, 0.5, 0.5, 0.2]
+    assert data.step_starts["0"] == [10]
+
+
+def test_training_convergence_single_stage_is_unchanged(tmp_path):
+    _write_metrics(
+        tmp_path / "0",
+        [(0, 0, 0, 1.0, 0.1, 1.0), (0, 0, 20, 0.5, 0.05, 0.5)],
+    )
+
+    data = TrainingConvergencePanel(
+        [tmp_path / "0"], datapath=tmp_path
+    ).compute_data({})
+
+    assert data.iter_num["0"] == [0, 20]
+    assert data.step_starts["0"] == []

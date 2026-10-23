@@ -37,9 +37,47 @@ class TrainingConvergenceData(PanelData):
     """Per-member fitting-iteration RMSE curves for one AL iteration."""
 
     # Keyed by str(member index) (JSON object keys are always strings).
+    # iter_num is cumulative over ladder steps / fit cycles (see
+    # _cumulative_iterations); step_starts holds the cumulative iteration
+    # at which each step after the first began.
     iter_num: dict[str, list[int]]
     rmse_epa: dict[str, list[float]]
     rmse_f_comp: dict[str, list[float]]
+    step_starts: dict[str, list[int]] = {}
+
+
+#: pacemaker restarts ``iter_num`` at 0 for every (ladder step, fit cycle).
+_FIT_STAGE_COLUMNS = ("ladder_step", "cycle_step")
+
+
+def _cumulative_iterations(df):
+    """Lay pacemaker's fit stages end to end on one iteration axis.
+
+    pacemaker logs ``iter_num`` per fit stage -- each ladder step and fit
+    cycle restarts it at 0 -- and repeats a stage's last row when the stage
+    finishes. Plotted raw, a ladder fit draws its stages on top of each
+    other, joined by lines from each stage's end back to the next one's
+    start. Returns ``(df, step_starts)``: ``df`` without the repeated rows
+    and with ``iter_num`` offset so each stage continues where the
+    previous one ended, plus the cumulative iteration at which each stage
+    after the first began.
+    """
+    stage_cols = [c for c in _FIT_STAGE_COLUMNS if c in df.columns]
+    if not stage_cols:
+        return df, []
+    df = df.drop_duplicates(
+        subset=[*stage_cols, "iter_num"], keep="last"
+    ).copy()
+    # A new stage starts wherever the stage columns change (file order).
+    stage = (df[stage_cols].ne(df[stage_cols].shift())).any(axis=1).cumsum()
+    offset, step_starts, cumulative = 0, [], []
+    for i, (_, rows) in enumerate(df.groupby(stage, sort=False)):
+        if i:
+            step_starts.append(int(offset))
+        cumulative.append(rows["iter_num"] + offset)
+        offset += int(rows["iter_num"].max())
+    df["iter_num"] = np.concatenate(cumulative).astype(int)
+    return df, step_starts
 
 
 class TrainingConvergencePanel(Entry):
@@ -90,6 +128,7 @@ class TrainingConvergencePanel(Entry):
         iter_num: dict = {}
         rmse_epa: dict = {}
         rmse_f_comp: dict = {}
+        step_starts: dict = {}
         for calcdir in calcdirs:
             member = calcdir.name
             try:
@@ -103,6 +142,7 @@ class TrainingConvergencePanel(Entry):
                     self._split,
                 )
                 continue
+            df, step_starts[member] = _cumulative_iterations(df)
             iter_num[member] = df["iter_num"].tolist()
             rmse_epa[member] = df["rmse_epa"].tolist()
             rmse_f_comp[member] = df["rmse_f_comp"].tolist()
@@ -113,24 +153,38 @@ class TrainingConvergencePanel(Entry):
                 f"member ({len(calcdirs)} calcdir(s) checked)."
             )
         return TrainingConvergenceData(
-            iter_num=iter_num, rmse_epa=rmse_epa, rmse_f_comp=rmse_f_comp
+            iter_num=iter_num,
+            rmse_epa=rmse_epa,
+            rmse_f_comp=rmse_f_comp,
+            step_starts=step_starts,
         )
 
     def plot_data(self):
         d = self.data
-        for member in sorted(d.iter_num, key=int):
-            self.ax_e.plot(
-                d.iter_num[member],
-                d.rmse_epa[member],
-                label=f"member {member}",
-            )
-            self.ax_f.plot(d.iter_num[member], d.rmse_f_comp[member])
-        self.ax_e.set_xlabel("fitting iteration")
+        for i, member in enumerate(sorted(d.iter_num, key=int)):
+            x = np.asarray(d.iter_num[member])
+            for ax, y, label in (
+                (self.ax_e, d.rmse_epa[member], f"member {member}"),
+                (self.ax_f, d.rmse_f_comp[member], None),
+            ):
+                y = np.asarray(y)
+                ax.plot(x, y, color=f"C{i}", label=label)
+                # Mark where each ladder step / fit cycle began.
+                starts = np.searchsorted(x, d.step_starts.get(member, []))
+                starts = starts[starts < len(x)]
+                ax.plot(
+                    x[starts], y[starts], "|", color=f"C{i}", ms=8, mew=1.5
+                )
+        stages = any(d.step_starts.values())
+        xlabel = "fitting iteration" + (
+            " (ladder steps end to end, | = step start)" if stages else ""
+        )
+        self.ax_e.set_xlabel(xlabel)
         self.ax_e.set_ylabel("RMSE energy/atom (eV)")
         self.ax_e.set_yscale("log")
         self.ax_e.legend(fontsize="small")
         self.ax_e.set_title(f"{self._split}: energy")
-        self.ax_f.set_xlabel("fitting iteration")
+        self.ax_f.set_xlabel(xlabel)
         self.ax_f.set_ylabel("RMSE force component (eV/Å)")
         self.ax_f.set_yscale("log")
         self.ax_f.set_title(f"{self._split}: forces")
