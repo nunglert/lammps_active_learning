@@ -64,6 +64,15 @@ class LammpsSamplingInput(ScriptInput):
             for small systems, but for large ones (hundreds of thousands of
             atoms) this can produce a huge dump file in minutes; set
             explicitly for those.
+        max_restarts: How often a LAMMPS run that exits non-zero is
+            retried (default 0: not at all). A retry resumes from the
+            newest restart file if the template writes them, else it
+            starts over -- see ``scripts/lammps_sampling.py``'s module
+            docstring for what the template has to do.
+        restart_frequency: Steps between restart files, rendered as
+            ``{{ restart_frequency }}`` (with ``{{ restart_file }}`` as the
+            file pattern). ``None`` (default): no restart files, so a retry
+            starts the run over.
         extra_template_kwargs: Arbitrary extra jinja2 render kwargs (e.g. a
             ``Schedule``'s ``temperature``/``timestep``/``n_run``),
             forwarded to the template verbatim alongside the fixed ones
@@ -128,6 +137,8 @@ class LammpsSamplingInput(ScriptInput):
     # lammps_al.select.scripts.committee_selection.
     backend: str = "mace"
     dump_frequency: Optional[int] = None
+    max_restarts: int = 0
+    restart_frequency: Optional[int] = None
     extra_template_kwargs: dict = field(default_factory=dict)
 
     def validate(self, root: Optional[Path] = None) -> None:
@@ -147,6 +158,17 @@ class LammpsSamplingInput(ScriptInput):
         if self.dump_frequency is not None and self.dump_frequency <= 0:
             raise ScriptInputError(
                 f"dump_frequency must be positive, got {self.dump_frequency}"
+            )
+
+        if self.max_restarts < 0:
+            raise ScriptInputError(
+                f"max_restarts must be >= 0, got {self.max_restarts}"
+            )
+
+        if self.restart_frequency is not None and self.restart_frequency <= 0:
+            raise ScriptInputError(
+                "restart_frequency must be positive, got "
+                f"{self.restart_frequency}"
             )
 
         if self.backend not in ("mace", "ace", "grace"):

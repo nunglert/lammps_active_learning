@@ -253,3 +253,23 @@ def test_extra_template_kwargs_defaults_empty_and_round_trips(tmp_path):
     input_file.write_text(json.dumps(input_data))
     loaded = LammpsSamplingInput.from_file(input_file)
     assert loaded.extra_template_kwargs == {"temperature": 1000, "n_run": 500}
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [("max_restarts", -1), ("restart_frequency", 0)],
+)
+def test_validate_bad_restart_settings(tmp_path, field, value):
+    lammps_exe = tmp_path / "lmp"
+    lammps_exe.touch()
+    config = LammpsSamplingInput(
+        lammps_path=lammps_exe,
+        template_file="t.in",
+        data_file="d.in",
+        model_files=["m.pt"],
+        element_mapping={"1": "H"},
+        seed=42,
+        **{field: value},
+    )
+    with pytest.raises(ScriptInputError, match=field):
+        config.validate()

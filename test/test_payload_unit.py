@@ -144,3 +144,137 @@ def test_convert_dump_to_extxyz_remaps_and_writes(tmp_path):
     assert len(frames) == 2
     for atoms in frames:
         assert atoms.get_chemical_symbols() == ["O", "Sr", "Ti"]
+
+
+# --- crash recovery ---------------------------------------------------------
+def _dump_steps(path):
+    lines = Path(path).read_text().splitlines()
+    return [
+        int(lines[i + 1])
+        for i, line in enumerate(lines)
+        if line == "ITEM: TIMESTEP"
+    ]
+
+
+def test_latest_restart_picks_highest_step(tmp_path):
+    for name in ("restart.500", "restart.1500", "restart.1000", "restart.x"):
+        (tmp_path / name).write_text("")
+
+    assert payload.latest_restart(tmp_path) == (
+        1500,
+        tmp_path / "restart.1500",
+    )
+    assert payload.latest_restart(tmp_path / "missing") is None
+
+
+def test_truncate_dump_drops_frames_from_restart_step(tmp_path):
+    dump = _write_dump(tmp_path / "d.dump", n_frames=4)
+    # A crashed run's partly written last frame.
+    with open(dump, "a") as f:
+        f.write("ITEM: TIMESTEP\n4\nITEM: NUMBER OF ATOMS\n")
+
+    kept = payload.truncate_dump(dump, before_step=2)
+
+    assert kept == 2
+    assert _dump_steps(dump) == [0, 1]
+    assert dump.read_text().endswith("0.0 0.0\n")
+
+
+# Stand-in for `lmp`: the run without read_restart dumps steps 0-20, writes
+# a restart file at step 20, starts dumping step 30 and dies; a run with
+# read_restart dumps steps 20-40 (appending) and succeeds. With
+# FAKE_LMP_ALWAYS_FAIL set, every run dies.
+_FAKE_LMP = r"""#!/usr/bin/env python3
+import os, sys
+args = sys.argv[1:]
+deck = open(args[args.index("-in") + 1]).read().split("\n")
+log = args[args.index("-log") + 1]
+words = {l.split()[0]: l.split()[1:] for l in deck if l.strip()}
+dump = words["dump"][0]
+resume = "read_restart" in words
+
+def frame(step):
+    return (f"ITEM: TIMESTEP\n{step}\nITEM: NUMBER OF ATOMS\n1\n"
+            "ITEM: BOX BOUNDS pp pp pp\n0 1\n0 1\n0 1\n"
+            "ITEM: ATOMS id type x y z\n1 1 0.0 0.0 0.0\n")
+
+with open(log, "w") as f:
+    f.write("resumed\n" if resume else "fresh\n")
+with open(dump, "a" if resume else "w") as f:
+    for step in ((20, 30, 40) if resume else (0, 10, 20)):
+        f.write(frame(step))
+    if not resume:
+        if "restart" in words:
+            pattern = words["restart"][1]
+            open(pattern.replace("*", "20"), "w").close()
+        f.write("ITEM: TIMESTEP\n30\n")
+if os.environ.get("FAKE_LMP_ALWAYS_FAIL") or not resume:
+    sys.exit(1)
+"""
+
+_RESTART_TEMPLATE = """{% if resume_file %}read_restart {{ resume_file }}
+{% endif %}dump {{ dump_file }}
+{% if restart_frequency %}restart {{ restart_frequency }} {{ restart_file }}
+{% endif %}"""
+
+
+def _run_with_restarts(tmp_path, **kwargs):
+    lmp = tmp_path / "lmp"
+    lmp.write_text(_FAKE_LMP)
+    lmp.chmod(0o755)
+    (tmp_path / "deck.j2").write_text(_RESTART_TEMPLATE)
+    outpath = tmp_path / "out"
+    outpath.mkdir()
+    payload.run_lammps_with_restarts(
+        outpath=outpath,
+        log_file=outpath / "lmp.log",
+        dump_file=outpath / "md.dump",
+        lmp_cmd=str(lmp),
+        input_file=outpath / "lammps.in",
+        template_dir=tmp_path,
+        template_file_name="deck.j2",
+        lammps_args="",
+        **kwargs,
+    )
+    return outpath
+
+
+def test_crashed_run_resumes_from_restart_file(tmp_path):
+    out = _run_with_restarts(tmp_path, max_restarts=2, restart_frequency=10)
+
+    assert _dump_steps(out / "md.dump") == [0, 10, 20, 30, 40]
+    log = (out / "lmp.log").read_text()
+    assert log.startswith("fresh\n")
+    assert "retry 1: resumed from restart.20" in log
+    assert log.endswith("resumed\n")
+    # Restart files only serve the recovery and are cleaned up after.
+    assert not list(out.glob("restart.*"))
+
+
+def test_crashed_run_without_restart_files_starts_over(tmp_path):
+    # Without restart files the retry is a fresh run, which the fake lmp
+    # always crashes.
+    with pytest.raises(RuntimeError):
+        _run_with_restarts(tmp_path, max_restarts=1)
+
+    log = (tmp_path / "out" / "lmp.log").read_text()
+    assert "retry 1: started over" in log
+    assert _dump_steps(tmp_path / "out" / "md.dump")[:3] == [0, 10, 20]
+
+
+def test_crash_recovery_gives_up_after_max_restarts(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_LMP_ALWAYS_FAIL", "1")
+
+    with pytest.raises(RuntimeError):
+        _run_with_restarts(tmp_path, max_restarts=2, restart_frequency=10)
+
+    log = (tmp_path / "out" / "lmp.log").read_text()
+    assert "retry 2:" in log
+    assert "retry 3:" not in log
+
+
+def test_no_retry_by_default(tmp_path):
+    with pytest.raises(RuntimeError):
+        _run_with_restarts(tmp_path, restart_frequency=10)
+
+    assert "retry" not in (tmp_path / "out" / "lmp.log").read_text()

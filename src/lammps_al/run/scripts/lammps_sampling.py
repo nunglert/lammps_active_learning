@@ -43,6 +43,17 @@ import-safe so they can be unit-tested. The heavy ``torch`` / ``mace`` imports
 are done lazily inside the functions that need them, so the pure helper
 (``parse_jinja_template``) imports with only ``ase`` + ``numpy`` + ``jinja2``
 present -- no MACE stack, no LAMMPS, no GPU.
+
+Crash recovery (``LammpsSamplingInput.max_restarts``): a LAMMPS run that
+exits non-zero is retried. If the template writes restart files (``restart
+{{ restart_frequency }} {{ restart_file }}``), the retry resumes from the
+newest one: the template is re-rendered with ``{{ resume_file }}`` set (it
+should then ``read_restart`` instead of ``read_data``, skip ``velocity
+create``, ``dump_modify ... append yes`` and ``run N upto``), the dump is cut
+back to the frames before the restart step, and the retry's LAMMPS log is
+appended to ``lmp.log``. Without restart files the retry starts over. This is
+aimed at sporadic GPU faults (e.g. ``cudaErrorIllegalAddress`` in a Kokkos
+pair style) that do not recur on a rerun from the same state.
 """
 
 import logging
@@ -65,6 +76,9 @@ import jinja2
 # -- "" is the right override there, since `pair_style mace` needs no
 # accelerator flags at all on a CPU-only build.
 DEFAULT_LAMMPS_ARGS = "-k on g 1 -sf kk -pk kokkos newton on neigh half"
+
+# ``restart N <outpath>/restart.*``: LAMMPS replaces ``*`` with the timestep.
+RESTART_PREFIX = "restart."
 
 
 def parse_jinja_template(
@@ -305,6 +319,148 @@ def run_lammps_from_template(
     return None
 
 
+def latest_restart(outpath: pathlib.Path) -> Optional[tuple[int, Path]]:
+    """The newest ``restart.<step>`` file in ``outpath`` as ``(step, path)``,
+    or ``None`` if there is none."""
+    found = []
+    for path in outpath.glob(RESTART_PREFIX + "*"):
+        suffix = path.name[len(RESTART_PREFIX) :]
+        if suffix.isdigit():
+            found.append((int(suffix), path))
+    return max(found) if found else None
+
+
+def truncate_dump(dump_file: pathlib.Path, before_step: int) -> int:
+    """Cut a LAMMPS text dump back to the frames with a timestep below
+    ``before_step``, in place.
+
+    A run resumed from the restart file at ``before_step`` re-dumps every
+    frame from there on (including ``before_step`` itself, the first step
+    of the resumed ``run``), so those frames -- and a partly written last
+    frame of the crashed run -- are dropped instead of duplicated.
+
+    Returns:
+        The number of frames kept.
+    """
+    if not dump_file.exists():
+        return 0
+    kept = 0
+    cut = None
+    with open(dump_file, "rb") as f:
+        while True:
+            offset = f.tell()
+            line = f.readline()
+            if not line:
+                break
+            if line.strip() != b"ITEM: TIMESTEP":
+                continue
+            step_line = f.readline()
+            try:
+                step = int(step_line)
+            except ValueError:
+                cut = offset
+                break
+            if step >= before_step:
+                cut = offset
+                break
+            kept += 1
+    if cut is not None:
+        with open(dump_file, "r+b") as f:
+            f.truncate(cut)
+    return kept
+
+
+def run_lammps_with_restarts(
+    *,
+    outpath: pathlib.Path,
+    log_file: pathlib.Path,
+    dump_file: pathlib.Path,
+    max_restarts: int = 0,
+    restart_frequency: Optional[int] = None,
+    logger: Optional[logging.Logger] = None,
+    **kwargs,
+) -> Optional[pathlib.Path]:
+    """``run_lammps_from_template``, retried up to ``max_restarts`` times
+    after a failed run -- see the module docstring.
+
+    Args:
+        outpath: Directory the restart files are written to.
+        log_file: The combined LAMMPS log; each retry's log is appended.
+        dump_file: The trajectory dump, rendered as ``{{ dump_file }}``.
+        max_restarts: Retries after a failed LAMMPS run (0: no retry).
+        restart_frequency: Steps between restart files, rendered as
+            ``{{ restart_frequency }}`` (``None``: the template should not
+            write any, and a retry starts over).
+        logger: Logger for retry messages.
+        **kwargs: Passed on to ``run_lammps_from_template``.
+
+    Returns:
+        Whatever the successful ``run_lammps_from_template`` call returned.
+    """
+    logger = logger or logging.getLogger(__name__)
+    restart_file = outpath / (RESTART_PREFIX + "*")
+    resume_file = None
+    for attempt in range(max_restarts + 1):
+        attempt_log = (
+            log_file
+            if attempt == 0
+            else log_file.with_name(f"{log_file.stem}.retry{attempt}.log")
+        )
+        try:
+            result = run_lammps_from_template(
+                log_file=attempt_log,
+                dump_file=dump_file,
+                restart_file=restart_file,
+                restart_frequency=restart_frequency,
+                resume_file=resume_file,
+                logger=logger,
+                **kwargs,
+            )
+            failure = None
+        except RuntimeError as run_error:
+            failure = run_error
+        if attempt > 0 and attempt_log.exists():
+            how = (
+                f"resumed from {resume_file.name}"
+                if resume_file
+                else "started over"
+            )
+            with open(log_file, "a") as combined:
+                combined.write(f"\n# ---- retry {attempt}: {how} ----\n")
+                combined.write(attempt_log.read_text(errors="replace"))
+        if failure is None:
+            break
+        if attempt == max_restarts:
+            raise failure
+        latest = latest_restart(outpath)
+        if latest is None:
+            resume_file = None
+            if dump_file.exists():
+                dump_file.unlink()
+            logger.warning(
+                "LAMMPS run failed (attempt %d of %d); no restart file "
+                "to resume from -- starting over.",
+                attempt + 1,
+                max_restarts + 1,
+            )
+        else:
+            step, resume_file = latest
+            kept = truncate_dump(dump_file, step)
+            logger.warning(
+                "LAMMPS run failed (attempt %d of %d); resuming from %s "
+                "(step %d, %d dump frames kept).",
+                attempt + 1,
+                max_restarts + 1,
+                resume_file.name,
+                step,
+                kept,
+            )
+    # Only needed to recover this run; they are as large as the dump.
+    for path in outpath.glob(RESTART_PREFIX + "*"):
+        path.unlink()
+    return result
+
+
 def convert_dump_to_extxyz(
     trajectory_file: pathlib.Path,
     element_mapping: dict,
@@ -372,7 +528,12 @@ def main(argv: Optional[list] = None) -> None:
             enable_cueq=input_config.enable_cueq,
         )
 
-    dump_file = run_lammps_from_template(
+    dump_file = run_lammps_with_restarts(
+        outpath=outpath,
+        # getattr: the cluster env's LammpsSamplingInput may predate these
+        # fields (from_file drops unknown keys), so fall back to no retry.
+        max_restarts=getattr(input_config, "max_restarts", 0),
+        restart_frequency=getattr(input_config, "restart_frequency", None),
         lmp_cmd=lammps_path,
         log_file=outpath / "lmp.log",
         input_file=config_path,
