@@ -169,6 +169,8 @@ class LammpsSampler(Sampler):
             restarting from ``data_path``. Falls back to ``data_path`` when
             no earlier iteration has one (e.g. the first sampling
             iteration). An explicit ``struct`` schedule kwarg still wins.
+            An iteration whose run was halted early (``fix halt``, see
+            ``lammps_sampling.py``) has no final frame and is skipped.
         stub: Dry-run without a cluster; emit a mock trajectory for testing
     """
 

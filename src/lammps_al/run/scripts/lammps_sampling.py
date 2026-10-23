@@ -43,6 +43,16 @@ import-safe so they can be unit-tested. The heavy ``torch`` / ``mace`` imports
 are done lazily inside the functions that need them, so the pure helper
 (``parse_jinja_template``) imports with only ``ase`` + ``numpy`` + ``jinja2``
 present -- no MACE stack, no LAMMPS, no GPU.
+
+A template can stop an unstable run early with ``fix ... halt ... error
+soft`` (e.g. when one atom's kinetic energy or force runs away). LAMMPS then
+ends the ``run`` cleanly and the deck carries on to its ``write_data``; this
+payload spots the halt in the log (``Fix halt condition ...``), appends that
+halt-time state to the trajectory as its last frame -- the configuration the
+potential failed on -- and keeps it as ``out/halted_final.data`` instead of
+``out/surface_final.data``, so ``continue_from_previous`` does not start the
+next iteration from a blown-up state. ``out/md_halted.info`` records the
+halt message.
 """
 
 import logging
@@ -305,6 +315,57 @@ def run_lammps_from_template(
     return None
 
 
+# Logged by LAMMPS's fix halt when its condition is met.
+HALT_LOG_MARKER = "Fix halt condition"
+
+
+def halt_message(log_file: pathlib.Path) -> Optional[str]:
+    """The ``fix halt`` message in a LAMMPS log, or ``None`` if the run was
+    not halted."""
+    if not log_file.exists():
+        return None
+    with open(log_file, errors="replace") as f:
+        for line in f:
+            if HALT_LOG_MARKER in line:
+                return line.strip()
+    return None
+
+
+def handle_halted_run(
+    outpath: pathlib.Path,
+    final_data_file: pathlib.Path,
+    trajectory_file: pathlib.Path,
+    element_mapping: dict,
+    message: str,
+) -> None:
+    """Set a halted run's outputs aside -- see the module docstring.
+
+    Args:
+        outpath: The payload's ``out/`` directory.
+        final_data_file: The deck's ``write_data`` output, written at the
+            halt step.
+        trajectory_file: The converted trajectory to append the halt-time
+            frame to.
+        element_mapping: LAMMPS atom type (as a string) -> element symbol.
+        message: The ``fix halt`` log line.
+    """
+    (outpath / "md_halted.info").write_text(message + "\n")
+    if not final_data_file.exists():
+        return
+    types = [int(t) for t in element_mapping]
+    atoms = ase.io.read(
+        final_data_file,
+        format="lammps-data",
+        Z_of_type={t: t for t in types},
+        atom_style="atomic",
+        units="metal",
+    )
+    for atom in atoms:
+        atom.symbol = element_mapping[str(atom.number)]
+    ase.io.write(trajectory_file, atoms, format="extxyz", append=True)
+    final_data_file.rename(outpath / "halted_final.data")
+
+
 def convert_dump_to_extxyz(
     trajectory_file: pathlib.Path,
     element_mapping: dict,
@@ -408,6 +469,17 @@ def main(argv: Optional[list] = None) -> None:
         element_mapping=input_config.element_mapping,
         output_file=trajectory_file,
     )
+
+    halted = halt_message(outpath / "lmp.log")
+    if halted is not None:
+        logging.getLogger().warning("LAMMPS run halted early: %s", halted)
+        handle_halted_run(
+            outpath=outpath,
+            final_data_file=outpath / "surface_final.data",
+            trajectory_file=trajectory_file,
+            element_mapping=input_config.element_mapping,
+            message=halted,
+        )
 
     # Success marker checked by SingleScriptTask.finish_check on the host.
     (calcpath / "is_finished.info").write_text("LAMMPS sampling finished")
