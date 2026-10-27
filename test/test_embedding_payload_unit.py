@@ -32,6 +32,7 @@ from lammps_al.embedding.scripts.geometry import (
     carve_box,
     find_rois,
 )
+from lammps_al.embedding.scripts.halted import halt_step, last_frame_before
 from lammps_al.embedding.scripts.surface_mesh import (
     _fallback_normal,
     _normal_from_mesh,
@@ -754,6 +755,94 @@ def test_anneal_template_renders_without_leftover_jinja():
         assert "{%" not in out
 
 
+def _two_stage_deck(**overrides):
+    return _render_anneal_template(
+        stages=[
+            _rendered_stage(index=0, type_list="1"),
+            _rendered_stage(
+                index=1,
+                type_list="2 3",
+                segments=[(300, 300, 50000)],
+                pressure_xy=None,
+                pressure_z=1.0,
+            ),
+        ],
+        **overrides,
+    )
+
+
+def test_anneal_template_counts_wall_energy():
+    """The ROI wall's energy is part of the potential energy, consistent
+    with the forces it applies."""
+    assert "fix_modify repel energy yes" in _two_stage_deck().splitlines()
+
+
+def test_anneal_template_zeroes_frozen_phase_velocities():
+    deck = _two_stage_deck()
+    assert (
+        "velocity    phase1_move set 0 0 0"
+        in deck.split("fix freeze_1_during_0")[1].split("run ")[0]
+    )
+    assert (
+        "velocity    phase0_move set 0 0 0"
+        in deck.split("fix freeze_0_during_1")[1].split("run ")[0]
+    )
+
+
+def test_anneal_template_npt_thermostats_the_mobile_phase():
+    """fix npt's own temperature compute is group all; with the rest of the
+    box frozen at 0 K it would heat the mobile phase far above the target,
+    so each NPT segment thermostats its phase's own temperature instead."""
+    lines = _render_anneal_template(
+        stages=[
+            _rendered_stage(index=0, type_list="1", pressure_xy=1.0),
+            _rendered_stage(
+                index=1, type_list="2 3", pressure_xy=None, pressure_z=None
+            ),
+        ]
+    ).splitlines()
+    lines = [l for l in lines if l.strip()]
+
+    assert "compute     t_phase0 phase0_move temp" in lines
+    fixes = [i for i, l in enumerate(lines) if l.startswith("fix 1 ")]
+    npt = [i for i in fixes if " npt " in lines[i]]
+    nvt = [i for i in fixes if " nvt " in lines[i]]
+    assert len(npt) == 2 and nvt
+    for i in npt:
+        assert lines[i + 1] == "fix_modify  1 temp t_phase0"
+    for i in nvt:
+        assert not lines[i + 1].startswith("fix_modify")
+    assert "compute     t_phase1" not in "\n".join(lines)
+
+
+def test_anneal_template_halts_on_runaway_atom():
+    lines = _two_stage_deck(
+        halt_max_kinetic_energy=5.0, halt_max_force=50.0
+    ).splitlines()
+    assert (
+        "variable    blowup equal (c_halt_max_ke>5.0)||(c_halt_max_f>50.0)"
+        in lines
+    )
+    assert "fix         blowup all halt 1 v_blowup > 0.5 error hard" in lines
+    # Active from before the first stage's MD.
+    first_run = next(
+        i for i, l in enumerate(lines) if l.startswith("run ") and l != "run 0"
+    )
+    assert (
+        lines.index("fix         blowup all halt 1 v_blowup > 0.5 error hard")
+        < first_run
+    )
+
+
+def test_anneal_template_halt_criteria_are_optional():
+    deck = _two_stage_deck(halt_max_kinetic_energy=None, halt_max_force=50.0)
+    assert "variable    blowup equal 0||(c_halt_max_f>50.0)" in deck
+    assert "halt" not in _two_stage_deck(
+        halt_max_kinetic_energy=None, halt_max_force=None
+    )
+    assert "halt" not in _two_stage_deck()
+
+
 def test_anneal_template_arbitrary_segment_count_all_present():
     """Every segment in a stage's list must produce its own run block, not
     just the first/last (this is exactly what was missing before -- a
@@ -995,3 +1084,60 @@ def test_anneal_template_z_wall_skipped_when_stage_epsilon_zero():
     assert "wall/harmonic zhi" not in out
     assert "wall/harmonic zlo" not in out
     assert "compute maxZ0" not in out
+
+
+# ---------------------------------------------------------------------------
+# halted.py (recovering a sample from a halted anneal)
+# ---------------------------------------------------------------------------
+
+
+def _anneal_dump(path, steps):
+    blocks = []
+    for step in steps:
+        blocks.append(
+            "\n".join(
+                [
+                    "ITEM: TIMESTEP",
+                    str(step),
+                    "ITEM: NUMBER OF ATOMS",
+                    "3",
+                    "ITEM: BOX BOUNDS pp pp pp",
+                    "0.0 10.0",
+                    "0.0 10.0",
+                    "0.0 10.0",
+                    "ITEM: ATOMS id type xs ys zs vx vy vz",
+                    f"1 1 0.1 0.1 {step / 1e5} 0 0 0",
+                    "2 2 0.2 0.1 0.1 0 0 0",
+                    "3 3 0.3 0.1 0.1 0 0 0",
+                ]
+            )
+        )
+    path.write_text("\n".join(blocks) + "\n")
+    return path
+
+
+def test_halt_step_parses_lammps_error(tmp_path):
+    log = tmp_path / "lmp.log"
+    log.write_text(
+        "Step Temp\n75000 300\nERROR: Fix halt condition for fix-id blowup "
+        "met on step 75010 with value 1 (src/fix_halt.cpp:300)\n"
+    )
+    assert halt_step(log) == 75010
+
+    log.write_text("ERROR: Particle outside surface of region\n")
+    assert halt_step(log) is None
+    assert halt_step(tmp_path / "missing.log") is None
+
+
+def test_last_frame_before_returns_pre_halt_frame(tmp_path):
+    dump = _anneal_dump(tmp_path / "anneal.dump", [0, 1000, 2000, 3000])
+
+    atoms = last_frame_before(dump, 2010, ["Cu", "H", "O"])
+
+    assert atoms.get_chemical_symbols() == ["Cu", "H", "O"]
+    # Atom 1's scaled z encodes the frame's step.
+    assert atoms.positions[0, 2] == pytest.approx(2000 / 1e5 * 10.0)
+    assert last_frame_before(dump, 3000, ["Cu", "H", "O"]).positions[
+        0, 2
+    ] == pytest.approx(2000 / 1e5 * 10.0)
+    assert last_frame_before(dump, 0, ["Cu", "H", "O"]) is None

@@ -203,28 +203,57 @@ _render_deck(
     roi_repel_radius=input_config.cutoff - input_config.roi_repel_margin,
     roi_repel_epsilon=input_config.roi_repel_epsilon,
     roi_repel_wall_cutoff=input_config.roi_repel_wall_cutoff,
+    # getattr: the cluster env's EmbeddingAnnealInput may predate these
+    # fields (from_file drops unknown keys) -- then no halt check.
+    halt_max_kinetic_energy=getattr(
+        input_config, "halt_max_kinetic_energy", None
+    ),
+    halt_max_force=getattr(input_config, "halt_max_force", None),
     # z-wall strength is resolved per-stage (each `stages` entry above
     # already carries its own z_wall_margin/epsilon/cutoff, falling back to
     # these same input_config values when a stage doesn't override them).
 )
 
-_run_lammps(
-    lmp_cmd=input_config.lammps_path,
-    log_file=outpath / "lmp.log",
-    input_file=config_path,
-    logger=logging.getLogger(),
-    extra_flags=input_config.lammps_flags,
-    n_processors=input_config.n_processors,
-)
+try:
+    _run_lammps(
+        lmp_cmd=input_config.lammps_path,
+        log_file=outpath / "lmp.log",
+        input_file=config_path,
+        logger=logging.getLogger(),
+        extra_flags=input_config.lammps_flags,
+        n_processors=input_config.n_processors,
+    )
+except RuntimeError:
+    # The deck's fix halt stopped a run that blew up: the box's sample is
+    # the last dumped frame before that (see scripts/halted.py). Any other
+    # LAMMPS failure still fails the box.
+    from lammps_al.embedding.scripts.halted import halt_step, last_frame_before
 
-# lammps-data has no element symbols, only type numbers -- Z_of_type maps
-# them back using the same type order the deck's mass/pair_coeff lines used.
-z_of_type = {
-    i + 1: atomic_numbers[sym] for i, sym in enumerate(input_config.species)
-}
-final_atoms = ase.io.read(
-    final_data_file, format="lammps-data", Z_of_type=z_of_type
-)
+    step = halt_step(outpath / "lmp.log")
+    final_atoms = (
+        None
+        if step is None
+        else last_frame_before(dump_file, step, input_config.species)
+    )
+    if final_atoms is None:
+        raise
+    logging.getLogger().warning(
+        "Anneal halted at step %d (an atom ran away); returning the last "
+        "dumped frame before it.",
+        step,
+    )
+    (outpath / "md_halted.info").write_text(f"halted at step {step}\n")
+else:
+    # lammps-data has no element symbols, only type numbers -- Z_of_type
+    # maps them back using the same type order the deck's mass/pair_coeff
+    # lines used.
+    z_of_type = {
+        i + 1: atomic_numbers[sym]
+        for i, sym in enumerate(input_config.species)
+    }
+    final_atoms = ase.io.read(
+        final_data_file, format="lammps-data", Z_of_type=z_of_type
+    )
 ase.io.write(outpath / "samples.extxyz", final_atoms, format="extxyz")
 
 # Success marker checked by SingleScriptTask.finish_check on the host.

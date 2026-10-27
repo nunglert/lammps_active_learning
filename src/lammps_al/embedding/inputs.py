@@ -320,6 +320,18 @@ class EmbeddingAnnealInput(ScriptInput):
         roi_repel_wall_cutoff: Interaction range (Angstrom) of the ROI
             repulsive wall -- the harmonic force is only felt within this
             distance of the wall surface.
+        halt_max_kinetic_energy: Stop the anneal (``fix halt``, checked
+            every step) once any mobile atom's kinetic energy exceeds
+            this (eV) -- the sign of an atom launched by a hole in the
+            potential. The box then returns the last dumped frame before
+            the halt as its sample (see ``scripts/halted.py``). ``None``
+            drops this criterion.
+        halt_max_force: Same, for the largest force on a mobile atom
+            (eV/Angstrom). ``None`` (default) drops this criterion; with
+            both ``None`` there is no halt check. Off by default because
+            an under-trained potential can give one-step force spikes
+            (over 100 eV/Angstrom) that a heavy atom shrugs off -- an atom
+            that is really launched shows up in its kinetic energy.
         z_wall_margin: Deck-wide default padding (Angstrom) added around
             each stage's mobile atoms' initial z-extent (measured fresh at
             the start of that stage) to build a pair of ``wall/harmonic``
@@ -372,6 +384,8 @@ class EmbeddingAnnealInput(ScriptInput):
     roi_repel_margin: float = 0.5
     roi_repel_epsilon: float = 10.0
     roi_repel_wall_cutoff: float = 1.0
+    halt_max_kinetic_energy: Optional[float] = 5.0
+    halt_max_force: Optional[float] = None
     z_wall_margin: float = 1.0
     z_wall_epsilon: float = 10.0
     z_wall_cutoff: float = 1.0
@@ -488,6 +502,10 @@ class EmbeddingAnnealInput(ScriptInput):
             raise ScriptInputError("roi_repel_epsilon must be non-negative")
         if self.roi_repel_wall_cutoff <= 0:
             raise ScriptInputError("roi_repel_wall_cutoff must be positive")
+        for name in ("halt_max_kinetic_energy", "halt_max_force"):
+            value = getattr(self, name)
+            if value is not None and value <= 0:
+                raise ScriptInputError(f"{name} must be positive or None")
 
         if self.z_wall_margin < 0:
             raise ScriptInputError("z_wall_margin must be non-negative")

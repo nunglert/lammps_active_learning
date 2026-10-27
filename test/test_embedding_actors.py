@@ -332,6 +332,8 @@ def test_embedding_annealer_array_job_builds_index_aligned_resources(
         "box_2.data",
     ]
     assert all(c.content["n_processors"] == 2 for c in configs)
+    assert all(c.content["halt_max_kinetic_energy"] == 5.0 for c in configs)
+    assert all(c.content["halt_max_force"] is None for c in configs)
     # Exact prefix, not just startswith("../"): ArrayScriptTask places each
     # box's calcdir at rootpath/calcdirs/<i> (remote_handler.core.remote_env.
     # CALCDIRS_DIRNAME) -- two directories below where copy_path uploads

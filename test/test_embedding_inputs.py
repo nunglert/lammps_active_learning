@@ -472,6 +472,16 @@ def test_embedding_anneal_input_roi_repel_wall_cutoff_not_positive(
         cfg.validate()
 
 
+@pytest.mark.parametrize(
+    "field", ["halt_max_kinetic_energy", "halt_max_force"]
+)
+def test_embedding_anneal_input_halt_thresholds_positive(tmp_path, field):
+    cfg = _valid_anneal_cfg(tmp_path, **{field: 0.0})
+    with pytest.raises(ScriptInputError, match=field):
+        cfg.validate()
+    _valid_anneal_cfg(tmp_path, **{field: None}).validate()
+
+
 def test_embedding_anneal_input_z_wall_margin_negative(tmp_path):
     cfg = _valid_anneal_cfg(tmp_path, z_wall_margin=-1.0)
     with pytest.raises(ScriptInputError, match="z_wall_margin"):

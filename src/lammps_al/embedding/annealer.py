@@ -163,6 +163,9 @@ class EmbeddingAnnealer(DetachableTaskMixin, Sampler):
         roi_repel_epsilon: See ``EmbeddingAnnealInput.roi_repel_epsilon``.
         roi_repel_wall_cutoff: See
             ``EmbeddingAnnealInput.roi_repel_wall_cutoff``.
+        halt_max_kinetic_energy: See
+            ``EmbeddingAnnealInput.halt_max_kinetic_energy``.
+        halt_max_force: See ``EmbeddingAnnealInput.halt_max_force``.
         z_wall_margin: See ``EmbeddingAnnealInput.z_wall_margin`` -- deck-wide
             default padding around each stage's mobile atoms' initial
             z-extent, used by any stage in ``anneal_stages`` that doesn't
@@ -256,6 +259,8 @@ class EmbeddingAnnealer(DetachableTaskMixin, Sampler):
         roi_repel_margin: float = 0.5,
         roi_repel_epsilon: float = 10.0,
         roi_repel_wall_cutoff: float = 1.0,
+        halt_max_kinetic_energy: Optional[float] = 5.0,
+        halt_max_force: Optional[float] = None,
         z_wall_margin: float = 1.0,
         z_wall_epsilon: Optional[float] = None,
         z_wall_cutoff: float = 1.0,
@@ -297,6 +302,8 @@ class EmbeddingAnnealer(DetachableTaskMixin, Sampler):
         self.roi_repel_margin = roi_repel_margin
         self.roi_repel_epsilon = roi_repel_epsilon
         self.roi_repel_wall_cutoff = roi_repel_wall_cutoff
+        self.halt_max_kinetic_energy = halt_max_kinetic_energy
+        self.halt_max_force = halt_max_force
         self.z_wall_margin = z_wall_margin
         self.z_wall_epsilon = (
             z_wall_epsilon
@@ -422,6 +429,8 @@ class EmbeddingAnnealer(DetachableTaskMixin, Sampler):
             "roi_repel_margin": self.roi_repel_margin,
             "roi_repel_epsilon": self.roi_repel_epsilon,
             "roi_repel_wall_cutoff": self.roi_repel_wall_cutoff,
+            "halt_max_kinetic_energy": self.halt_max_kinetic_energy,
+            "halt_max_force": self.halt_max_force,
             "z_wall_margin": self.z_wall_margin,
             "z_wall_epsilon": self.z_wall_epsilon,
             "z_wall_cutoff": self.z_wall_cutoff,

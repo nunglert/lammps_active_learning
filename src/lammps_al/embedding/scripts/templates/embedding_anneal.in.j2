@@ -55,10 +55,35 @@ run 0
 # never unfixed, so it stays active for the whole rest of the run,
 # whichever stage is currently being annealed.
 fix repel moving wall/region repSphere harmonic {{ roi_repel_epsilon }} 0.0 {{ roi_repel_wall_cutoff }}
+# Count the wall's energy in the potential energy too, so energy and forces
+# stay consistent (a minimisation's line search otherwise stalls as soon as
+# an atom is within the wall's range).
+fix_modify repel energy yes
+
+{% if halt_max_kinetic_energy or halt_max_force %}
+# Stop as soon as one mobile atom runs away (a hole in the potential launches
+# it and the anneal heats up within tens of steps). error hard: the payload
+# then returns the last dumped frame before this step as the box's sample --
+# the configuration the potential failed from. Checked every step: a
+# launched atom can reach the ROI repulsive wall's region within a few steps,
+# and fix wall/region's own error would then end the run without the halt
+# line the payload salvages the box from.
+compute     halt_ke_atom moving ke/atom
+compute     halt_max_ke moving reduce max c_halt_ke_atom
+variable    halt_f_atom atom sqrt(fx*fx+fy*fy+fz*fz)
+compute     halt_max_f moving reduce max v_halt_f_atom
+variable    blowup equal {% if halt_max_kinetic_energy %}(c_halt_max_ke>{{ halt_max_kinetic_energy }}){% else %}0{% endif %}||{% if halt_max_force %}(c_halt_max_f>{{ halt_max_force }}){% else %}0{% endif %}
+
+fix         blowup all halt 1 v_blowup > 0.5 error hard
+{% endif %}
 
 {% for st in stages %}
 {% for other in stages if other.index != st.index %}
 fix freeze_{{ other.index }}_during_{{ st.index }} phase{{ other.index }} setforce 0.0 0.0 0.0
+# setforce leaves velocities alone; zero them so the frozen phase's leftover
+# velocities don't count towards the logged temperature or end up in the
+# final data file.
+velocity    phase{{ other.index }}_move set 0 0 0
 {% endfor %}
 
 velocity    phase{{ st.index }}_move set 0 0 0
@@ -90,8 +115,17 @@ fix zwall_lo_{{ st.index }} phase{{ st.index }}_move wall/harmonic zlo ${zmin{{ 
 {% endif %}
 
 {% set ens = "npt" if (st.pressure_xy is not none or st.pressure_z is not none) else "nvt" %}
+{% if ens == "npt" %}
+# fix npt thermostats the temperature of group all (its pressure covers the
+# whole box), and most of the box is frozen at 0 K here -- it would heat
+# phase{{ st.index }}_move far above the target. Thermostat this phase's own temperature.
+compute     t_phase{{ st.index }} phase{{ st.index }}_move temp
+{% endif %}
 {% for seg_from, seg_to, seg_steps in st.segments %}
 fix 1 phase{{ st.index }}_move {{ ens }} temp {{ seg_from }} {{ seg_to }} 0.05{% if st.pressure_xy is not none %} x {{ st.pressure_xy }} {{ st.pressure_xy }} 0.5 y {{ st.pressure_xy }} {{ st.pressure_xy }} 0.5{% endif %}{% if st.pressure_z is not none %} z {{ st.pressure_z }} {{ st.pressure_z }} 0.5{% endif %} dilate moving
+{% if ens == "npt" %}
+fix_modify  1 temp t_phase{{ st.index }}
+{% endif %}
 run {{ seg_steps }}
 unfix 1
 {% endfor %}
