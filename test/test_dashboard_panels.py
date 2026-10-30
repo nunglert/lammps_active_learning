@@ -43,6 +43,9 @@ from lammps_al.dashboard.panels.species_parity import (  # noqa: E402
     SpeciesForceParityPanel,
     SpeciesParityData,
 )
+from lammps_al.dashboard.panels.test_set import (  # noqa: E402
+    FixedSetErrorPanel,
+)
 from lammps_al.dashboard.panels.training_fit import (  # noqa: E402
     TrainingConvergencePanel,
     TrainingParityPanel,
@@ -484,6 +487,61 @@ def test_cross_iteration_error_panel_no_data_raises(tmp_path):
     )
     with pytest.raises(ValueError):
         panel.compute_data({})
+
+
+# ---------------------------------------------------------------------------
+# FixedSetErrorPanel
+# ---------------------------------------------------------------------------
+def _offset_by_model(model_files, atoms_list, **kwargs):
+    """Committee "m_<k>" is off by k meV/atom in energy and 0.01*k in every
+    force component."""
+    k = int(Path(model_files[0]).stem.split("_")[-1])
+    energies = [
+        float(a.info["REF_energy"]) + 1e-3 * k * len(a) for a in atoms_list
+    ]
+    forces = [
+        np.asarray(a.arrays["REF_forces"]) + 0.01 * k for a in atoms_list
+    ]
+    return energies, forces
+
+
+def test_fixed_set_error_panel_per_iteration_and_reference(
+    monkeypatch, tmp_path
+):
+    rng = np.random.default_rng(7)
+    test_set = tmp_path / "test.xyz"
+    ase_io.write(test_set, [_make_config(rng, e_ref=-1.0) for _ in range(3)])
+    monkeypatch.setattr(
+        "lammps_al.dashboard.panels.test_set.score_with_committee",
+        _offset_by_model,
+    )
+    panel = FixedSetErrorPanel(
+        {0: ["m_3.yaml"], 1: ["m_2.yaml"]},
+        test_set,
+        reference_models=["m_1.yaml"],
+        datapath=tmp_path,
+    )
+    _render(panel)
+
+    d = panel.data
+    assert d.n_frames == 3
+    assert d.model_iterations == [0, 1]
+    assert d.e_rmse == pytest.approx([3, 2])
+    assert d.f_mae == pytest.approx([0.03, 0.02])
+    assert d.reference == pytest.approx([1, 0.01, 1, 0.01])
+
+
+def test_fixed_set_error_panel_without_reference(monkeypatch, tmp_path):
+    rng = np.random.default_rng(8)
+    test_set = tmp_path / "test.xyz"
+    ase_io.write(test_set, [_make_config(rng, e_ref=-1.0)])
+    monkeypatch.setattr(
+        "lammps_al.dashboard.panels.test_set.score_with_committee",
+        _offset_by_model,
+    )
+    panel = FixedSetErrorPanel({0: ["m_1.yaml"]}, test_set, datapath=tmp_path)
+    _render(panel)
+    assert panel.data.reference is None
 
 
 # ---------------------------------------------------------------------------

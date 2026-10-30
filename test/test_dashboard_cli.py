@@ -78,6 +78,10 @@ def _patch_committee_scoring(monkeypatch):
         "lammps_al.dashboard.panels.cross_iteration.score_with_committee",
         _fake_score_with_committee,
     )
+    monkeypatch.setattr(
+        "lammps_al.dashboard.panels.test_set.score_with_committee",
+        _fake_score_with_committee,
+    )
 
 
 @pytest.fixture
@@ -339,6 +343,29 @@ def test_panel_config_disable_add_and_species_override(
     # Unset `species` inherits the run-global list; an explicit one wins.
     assert entries[1]._species == ["Cu", "H", "O"]
     assert entries[-1]._species == ["Cu"]
+
+
+def test_test_set_errors_panel_needs_an_existing_test_set(
+    tmp_path, two_iteration_calchome
+):
+    progress = run_layout.load_progress(two_iteration_calchome)
+    summary = campaign_context(
+        two_iteration_calchome, progress, range(2), ["Cu", "H", "O"]
+    )
+    test_set = two_iteration_calchome / "test.xyz"
+    ase_io.write(test_set, [_make_config(np.random.default_rng(0), -1.0)])
+
+    def names(spec):
+        config = parse_panel_config({"panels": [spec]})
+        return _names(
+            assemble(summary, datapath=tmp_path, panel_config=config)
+        )
+
+    assert names({"type": "test_set_errors"}) == []
+    assert names({"type": "test_set_errors", "test_set": "missing.xyz"}) == []
+    assert names({"type": "test_set_errors", "test_set": "test.xyz"}) == [
+        "test_set_errors"
+    ]
 
 
 def test_panel_config_panels_replaces_defaults(

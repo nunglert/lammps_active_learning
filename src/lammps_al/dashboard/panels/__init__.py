@@ -15,6 +15,7 @@ from lammps_al.dashboard.panels import (  # noqa: F401
     roi_spatial,
     sampler_thermo,
     species_parity,
+    test_set,
     training_fit,
     uncertainty,
 )
