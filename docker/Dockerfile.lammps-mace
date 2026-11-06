@@ -17,8 +17,9 @@
 #
 # Two ways to build & push (the install cost is paid once, not per-pipeline):
 #
-#   A) In CI: run the manual `build-lammps-image` job (kaniko) in .gitlab-ci.yml.
-#      It pushes to $CI_REGISTRY_IMAGE/lammps-mace:cpu automatically.
+#   A) In CI: run the "LAMMPS image" workflow (.github/workflows/
+#      lammps-image.yml) manually. It pushes to
+#      ghcr.io/<owner>/<repo>/lammps-mace:cpu automatically.
 #
 #   B) Locally (easier to iterate while validating the Dockerfile, and this is
 #      also how to get the SAME environment CI tests in for local dev/debugging
@@ -26,13 +27,10 @@
 #        docker build -f docker/Dockerfile.lammps-mace -t lammps-mace:cpu .
 #        docker run --rm -v "$PWD":/work -w /work lammps-mace:cpu \
 #            bash -c "pip install --no-cache-dir '.[dev]' && pytest -m lammps -s"
-#      To push a build to this project's registry instead (get the registry
-#      path from the project's Container Registry page or `echo
-#      $CI_REGISTRY_IMAGE` in a CI job -- do NOT hardcode a registry hostname,
-#      it is instance-specific):
-#        REG=<your $CI_REGISTRY, e.g. gitlab.tuwien.ac.at:5050>
-#        IMG=$REG/e165-03-1_theoretische_materialchemie/madsen-s-research-group/lammps_active_learning/lammps-mace:cpu
-#        docker login "$REG" && docker build -f docker/Dockerfile.lammps-mace -t "$IMG" . && docker push "$IMG"
+#      To push a local build to GHCR instead (needs a GitHub token with the
+#      write:packages scope):
+#        IMG=ghcr.io/nunglert/lammps_active_learning/lammps-mace:cpu
+#        docker login ghcr.io && docker build -f docker/Dockerfile.lammps-mace -t "$IMG" . && docker push "$IMG"
 #
 
 FROM python:3.11-slim

@@ -29,16 +29,16 @@ readme = "README.md"
 
 [project.optional-dependencies]
 run = [
-    "remote_handler[dev] @ git+ssh://git@gitlab.tuwien.ac.at/e165-03-1_theoretische_materialchemie/madsen-s-research-group/remote_handler.git@dev-NU",
+    "remote_handler[dev] @ git+https://github.com/nunglert/remote_handler.git@main",
 ]
 ace = [
-    "remote_handler[ace] @ git+ssh://git@gitlab.tuwien.ac.at/e165-03-1_theoretische_materialchemie/madsen-s-research-group/remote_handler.git@dev-NU",
+    "remote_handler[ace] @ git+https://github.com/nunglert/remote_handler.git@main",
 ]
 grace = [
-    "remote_handler[grace] @ git+ssh://git@gitlab.tuwien.ac.at/e165-03-1_theoretische_materialchemie/madsen-s-research-group/remote_handler.git@dev-NU",
+    "remote_handler[grace] @ git+https://github.com/nunglert/remote_handler.git@main",
 ]
 mace = [
-    "remote_handler[mace_freeze] @ git+ssh://git@gitlab.tuwien.ac.at/e165-03-1_theoretische_materialchemie/madsen-s-research-group/remote_handler.git@dev-NU",
+    "remote_handler[mace_freeze] @ git+https://github.com/nunglert/remote_handler.git@main",
 ]
 # GPU-accelerated ACE fitting (pacemaker's `tensorpot` backend) AND
 # GPU-accelerated ACE committee-uncertainty scoring
@@ -53,7 +53,7 @@ mace = [
 # remote_handler needs to know about; confirmed substantially faster than
 # ASE's own neighbor list at real campaign scale.
 ace_tensorpot_gpu = [
-    "remote_handler[ace_tensorpot_gpu] @ git+ssh://git@gitlab.tuwien.ac.at/e165-03-1_theoretische_materialchemie/madsen-s-research-group/remote_handler.git@dev-NU",
+    "remote_handler[ace_tensorpot_gpu] @ git+https://github.com/nunglert/remote_handler.git@main",
     "matscipy",
 ]
 # ovito's plain PyPI wheel doesn't bundle its own Qt/OpenGL libs and fails
@@ -66,7 +66,7 @@ embedding = [
     "ovito"
 ]
 dashboard = [
-    "alviz @ git+ssh://git@gitlab.tuwien.ac.at/e165-03-1_theoretische_materialchemie/madsen-s-research-group/alviz.git@main",
+    "alviz @ git+https://github.com/nunglert/alviz.git@main",
     # RDFs in panels.box_structure (structure_stats.compute_partial_rdf) --
     # same portable PyPI package as ace_tensorpot_gpu's matscipy, just also
     # needed here, independent of that extra.

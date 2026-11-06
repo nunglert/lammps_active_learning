@@ -12,6 +12,19 @@ the new `## [X.Y.Z] — YYYY-MM-DD`, add a fresh empty `[Unreleased]`, then tag.
 
 ## [Unreleased]
 
+### Changed
+- **The repository moved to GitHub:**
+  <https://github.com/nunglert/lammps_active_learning>. CI runs on GitHub
+  Actions; the GitLab project is no longer updated.
+- **`remote_handler` and `alviz` install from public GitHub HTTPS URLs**
+  instead of GitLab SSH URLs, so installing needs no SSH key and CI needs no
+  token. `remote_handler` is pinned to `main` instead of `dev-NU`.
+- **The MACE-LAMMPS image lives on GHCR**
+  (`ghcr.io/nunglert/lammps_active_learning/lammps-mace:cpu`), built by the
+  "LAMMPS image" workflow. The `resolve-lammps-image` digest lookup is gone:
+  GitHub-hosted runners pull the image fresh on every run, so a stale
+  node-cached `:cpu` tag can't happen.
+
 ### Fixed
 - **`lammps-smoke` failed with `invalid pull policy ([Always]) ... not one of
   the allowed_pull_policies ([])`.** This runner's Kubernetes executor locks
@@ -85,4 +98,4 @@ the new `## [X.Y.Z] — YYYY-MM-DD`, add a fresh empty `[Unreleased]`, then tag.
   needs only `remote_handler` + `ase` + `numpy`. The `examples/mace_md_AL`
   Cu/Co surface workflow moved over as a runnable reference.
 
-[Unreleased]: https://gitlab.tuwien.ac.at/e165-03-1_theoretische_materialchemie/madsen-s-research-group/lammps_active_learning/-/commits/main
+[Unreleased]: https://github.com/nunglert/lammps_active_learning/commits/main

@@ -77,12 +77,13 @@ Reducing that candidate pool further (diversity/novelty filtering) is a
 
 ## Install (local dev)
 
-`remote_handler` is pinned by SSH git-URL. With an SSH key to the GitLab
-instance it installs directly; otherwise install a sibling checkout editable,
+`remote_handler` is pinned by a public HTTPS git URL on GitHub, so it
+installs directly with no SSH key or token. To work against unpushed or local
+`remote_handler` changes (or offline), install a sibling checkout editable,
 then this project with `--no-deps`:
 
 ```bash
-# Either (SSH key present):
+# Either (from GitHub):
 pip install -e ".[run]"
 
 # Or (offline / sibling checkout):
