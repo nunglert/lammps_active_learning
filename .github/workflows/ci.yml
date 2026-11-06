@@ -5,20 +5,23 @@ name: CI
 # (remote_handler and alviz from public GitHub, mace/ace/grace stacks from
 # public GitHub/PyPI -- no tokens needed).
 #
-# Two jobs:
+# Three jobs:
 #   * test          -- everything except the `lammps` tier, on python:3.13.
-#   * lammps-smoke  -- the real-binary LAMMPS tier, inside the prebuilt
-#                      MACE-LAMMPS image that lammps-image.yml publishes to
-#                      GHCR. That image must have been built once (run the
-#                      "LAMMPS image" workflow manually) before this job can
-#                      pass.
+#   * build-image   -- (re)builds the CPU MACE-LAMMPS image
+#                      (docker/Dockerfile.lammps-mace) and pushes it to GHCR,
+#                      but only when it needs to (see the job's comment).
+#   * lammps-smoke  -- the real-binary LAMMPS tier, inside that image. It
+#                      waits for build-image, so it always runs on the image
+#                      this run built, or on the published :cpu if none was
+#                      built.
 
 on:
   push:
     branches: [main]
   pull_request:
   # Weekly run: the safety net against API drift in remote_handler -- nothing
-  # changed here, but its main may have moved.
+  # changed here, but its main may have moved. It also rebuilds the LAMMPS
+  # image, catching upstream drift in its unpinned sources (e.g. torch).
   schedule:
     - cron: "0 4 * * 1"
   workflow_dispatch:
@@ -69,20 +72,128 @@ jobs:
           name: test-report
           path: report.xml
 
-  # Real end-to-end LAMMPS smoke test on the prebuilt MACE-LAMMPS image (see
+  # Build & push the CPU MACE-LAMMPS image. Rebuilding LAMMPS from source is
+  # heavy (~20-40 min), so it only builds when it needs to:
+  #   * the Dockerfile changed (in the pushed commits, or in the PR),
+  #   * the weekly schedule,
+  #   * a manual run (workflow_dispatch) -- also how to publish the image
+  #     the first time.
+  # Otherwise the job finishes in seconds without building, and lammps-smoke
+  # uses the published :cpu image.
+  #
+  # Where it pushes:
+  #   * main (push, schedule, manual)  -> :cpu, the image everyone uses
+  #   * a pull request                 -> :pr-<number>, so the PR's smoke
+  #                                       test runs on the image it changes
+  #                                       while :cpu stays untouched
+  #   * a manual run on another branch -> :branch-<name>
+  #   * a PR from a fork               -> build only, no push: GitHub gives
+  #                                       fork PRs a read-only token. The
+  #                                       smoke test then uses :cpu.
+  build-image:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      # Set only once a push succeeded; empty means "use :cpu".
+      image: ${{ steps.published.outputs.image }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # History to diff the Dockerfile against.
+          fetch-depth: 0
+
+      - name: Decide whether to build, and where to push
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          REF_NAME: ${{ github.ref_name }}
+          BEFORE: ${{ github.event.before }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          IS_FORK: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
+          IMAGE: ghcr.io/${{ github.repository }}/lammps-mace
+        run: |
+          dockerfile=docker/Dockerfile.lammps-mace
+          changed_since() {
+            # Rebuild if the base is unknown (e.g. a force-push dropped it).
+            git cat-file -e "$1^{commit}" 2>/dev/null || return 0
+            ! git diff --quiet "$1" HEAD -- "$dockerfile"
+          }
+          case "$EVENT" in
+            schedule|workflow_dispatch) build=true ;;
+            # The PR checkout is the merge commit; its first parent is the
+            # base branch.
+            pull_request) changed_since HEAD^1 && build=true || build=false ;;
+            push) changed_since "$BEFORE" && build=true || build=false ;;
+            *) build=false ;;
+          esac
+
+          push=true
+          if [ "$EVENT" = pull_request ]; then
+            tag="pr-$PR_NUMBER"
+            [ "$IS_FORK" = true ] && push=false
+          elif [ "$REF_NAME" = main ]; then
+            tag=cpu
+          else
+            tag="branch-$(printf %s "$REF_NAME" | tr -c 'A-Za-z0-9_.-' -)"
+          fi
+
+          echo "build=$build push=$push image=$IMAGE:$tag"
+          {
+            echo "build=$build"
+            echo "push=$push"
+            echo "image=$IMAGE:$tag"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@v3
+        if: steps.plan.outputs.build == 'true'
+
+      - uses: docker/login-action@v3
+        if: steps.plan.outputs.build == 'true' && steps.plan.outputs.push == 'true'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        if: steps.plan.outputs.build == 'true'
+        with:
+          context: .
+          file: docker/Dockerfile.lammps-mace
+          push: ${{ steps.plan.outputs.push == 'true' }}
+          tags: ${{ steps.plan.outputs.image }}
+          # Links the package to this repo, so the repo's GITHUB_TOKEN can
+          # pull it in lammps-smoke even while the package itself is private.
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+
+      - name: Hand the pushed image to lammps-smoke
+        id: published
+        if: steps.plan.outputs.build == 'true' && steps.plan.outputs.push == 'true'
+        run: echo "image=${{ steps.plan.outputs.image }}" >> "$GITHUB_OUTPUT"
+
+  # Real end-to-end LAMMPS smoke test on the MACE-LAMMPS image (see
   # docker/Dockerfile.lammps-mace). The image already ships lmp + mace-torch +
   # torch (CPU); here we add remote_handler (base, no mace extra) + this
   # package without reinstalling the heavy stack, then run only the `lammps`
-  # tier. Hosted runners pull the image fresh every run, so the :cpu tag is
-  # always the latest published build.
+  # tier.
+  #
+  # Runs after build-image, on the image it pushed, or on the published :cpu
+  # when it didn't push one: nothing to rebuild, a fork PR, or a failed build
+  # (so a broken weekly rebuild still leaves the last good image tested).
+  # Hosted runners pull the image fresh every run, so :cpu is always the
+  # latest published build.
   #
   # continue-on-error: this tier depends on an external image + registry, so
   # a missing image or a pull hiccup shouldn't fail the whole run.
   lammps-smoke:
+    needs: build-image
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     continue-on-error: true
     container:
-      image: ghcr.io/${{ github.repository }}/lammps-mace:cpu
+      image: ${{ needs.build-image.outputs.image || format('ghcr.io/{0}/lammps-mace:cpu', github.repository) }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
