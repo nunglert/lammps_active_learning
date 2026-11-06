@@ -1,0 +1,15 @@
+#!/bin/bash
+#SBATCH --job-name={{ jobname }}
+#SBATCH --partition={{ partition }}
+#SBATCH --gres=gpu:{{ n_cores }}
+#SBATCH --ntasks=1
+#SBATCH --qos={{ partition }}
+#SBATCH --time=3-00:00:00
+{{ slurm_header_add }}
+echo "Running on host: $(hostname)"
+
+set -euo pipefail
+
+{{ conda_activation }}
+
+{% include job_type_template %}

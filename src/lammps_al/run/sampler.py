@@ -1,4 +1,4 @@
-"""The LAMMPS MD-uncertainty Sampler for this project.
+"""The LAMMPS MD Sampler for this project.
 
 In the layered architecture, concrete samplers belong to the *project*, not to
 the orchestrator: ``remote_handler`` owns the ``Sampler`` *interface* and the
@@ -7,21 +7,53 @@ the SLURM templating), while the application picks and wires the actual
 sampling method.
 
 ``LammpsSampler`` is a **native** implementation of that interface for LAMMPS
-molecular dynamics with committee-uncertainty sampling. Per AL iteration it:
+molecular dynamics, generic over the committee's potential family
+(``backend``: ``"mace"`` default, or ``"ace"``/``"grace"`` -- see
+``lammps_sampling.py``'s module docstring). Per AL iteration it:
 
-    1. compiles the committee's first MACE model for LAMMPS (MLIAP) and renders
-       the user's ``lammps.in`` jinja2 template;
+    1. compiles the committee's first MACE model for LAMMPS (backend="mace"
+       only -- ACE/GRACE's native pair styles need no compile step) and
+       renders the user's ``lammps.in`` jinja2 template;
     2. runs a LAMMPS MD trajectory on the cluster via a ``SingleScriptTask``
        (shipping the payload ``scripts/lammps_sampling.py``, located by
        :func:`lammps_al.run.scripts.script_dir`);
-    3. scores every frame's local force-uncertainty against the committee,
-       splits the trajectory into ``num_samples`` segments, and returns the
-       most-uncertain frame from each.
+    3. converts the raw dump to a proper ``trajectory.extxyz`` (correct
+       chemical symbols via ``element_mapping``) and returns it.
+
+This sampler only generates dynamics -- it does not score or select
+candidates. Committee-uncertainty scoring and peak-frame selection is a
+separate actor/loop-role,
+:class:`lammps_al.select.selector.CommitteeUncertaintySelector` (a
+``Selector``, consuming this sampler's trajectory output plus the
+committee's model files), mirroring this repo's existing
+``ROIExtractor``/``EmbeddingAnnealer`` split (a ``Sampler`` doing dynamics
+and a peer ``Selector`` doing selection, rather than one actor doing both).
+
+For ``backend="mace"``, step 1 targets one of two LAMMPS/MACE coupling
+routes, chosen per run via ``lammps_pair_style`` (default ``"mliap"``,
+unchanged production behaviour):
+
+* ``"mliap"`` (**default, production**) -- the ML-IAP Python bridge
+  (``pair_style mliap unified``), the KOKKOS-on-GPU setup this sampler has
+  always targeted.
+* ``"mace"`` (**CPU-testable, opt-in**) -- LAMMPS's native ``pair_style mace``
+  (the ``ML-MACE`` package, built against LibTorch directly). For any MACE
+  model with more than one interaction layer (i.e. essentially all real
+  models), the ML-IAP route needs LAMMPS's ghost-atom message-passing hooks,
+  which are Kokkos-CUDA-only -- confirmed by building both the ACEsuit
+  LAMMPS fork and vanilla upstream ``develop`` and hitting ``AttributeError:
+  ... no attribute 'forward_exchange'`` on CPU either way. ``"mace"`` has no
+  such limitation and is what the CPU-only ``lammps-smoke`` CI job (and
+  local Docker-based testing, see ``docker/Dockerfile.lammps-mace``) use --
+  it exists purely to make this sampler's payload testable without a GPU,
+  not to replace the production route.
 
 Requires the ``[run]`` extra (``pip install ".[run]"`` -> remote_handler + a
 MACE stack). The cluster conda env that runs the payload needs ``lammps_al``
-(for the input schema), ``mace-torch``, ``torch`` and a LAMMPS build with the
-MLIAP/MACE interface; the host side needs just ``remote_handler`` + ``ase``.
+(for the input schema), ``mace-torch``, ``torch`` and a LAMMPS build with
+either package (``mliap`` needs ML-IAP + Kokkos-CUDA; ``mace`` needs the
+``ML-MACE`` package, CPU or GPU); the host side needs just
+``remote_handler`` + ``ase``.
 
 ``stub=True`` dry-runs the loop (mock samples, no cluster) for testing.
 """
@@ -43,17 +75,39 @@ from remote_handler.core.tasks import SingleScriptTask
 from remote_handler.exceptions import WorkflowError
 from remote_handler.workflows.active_learning_base import Sampler
 
+from lammps_al.run.inputs import FINAL_DATA_NAME
 from lammps_al.run.scripts import script_dir
 
 logger = logging.getLogger(__name__)
+
+# Keys LammpsSampler itself recognizes and sets in script_input (mirrors
+# LammpsSamplingInput's own field names, minus extra_template_kwargs itself).
+# Any update(**kwargs) key outside this set is a schedule/template parameter
+# (e.g. temperature/timestep/n_run) forwarded via extra_template_kwargs
+# instead of being written as a top-level key -- a top-level unknown key
+# would otherwise be silently dropped as an "unknown key" by
+# LammpsSamplingInput.from_file (the same class of bug that once ate a
+# dump_frequency override under a colliding field name).
+_KNOWN_SCRIPT_INPUT_KEYS = {
+    "lammps_path",
+    "template_file",
+    "data_file",
+    "model_files",
+    "lammps_config_name",
+    "seed",
+    "lammps_args",
+    "lammps_pair_style",
+    "enable_cueq",
+    "backend",
+    "element_mapping",
+    "dump_frequency",
+}
 
 
 def remap_elements(
     structs: list, element_mapping: Optional[dict] = None
 ) -> list:
-    """Convert LAMMPS atom-type indices to element symbols, in place.
-
-    """
+    """Convert LAMMPS atom-type indices to element symbols, in place."""
     if not element_mapping:
         return structs
     for atoms in structs:
@@ -65,20 +119,19 @@ def remap_elements(
 
 
 class LammpsSampler(Sampler):
-    """MD sampler using LAMMPS with committee-uncertainty-based sampling.
+    """MD sampler using LAMMPS: runs dynamics only, no scoring/selection.
 
-    Runs LAMMPS molecular dynamics and selects configurations based on model
-    uncertainty. Supports stub mode for testing without actual LAMMPS
+    Runs LAMMPS molecular dynamics and returns the resulting trajectory as a
+    proper extxyz file. Supports stub mode for testing without actual LAMMPS
     execution.
 
     Args:
         remote_fs: FileSystemHandlerBase for the machine where sampling runs
         template_path: Path to jinja2 template for the lammps.in file
         data_path: Path to lammps.data file with the starting configuration
-        element_mapping: Dict mapping atom type numbers to element symbols
-        num_samples: Number of configurations to sample per generation
-        uncertainty_cutoff_radius: Cutoff radius (Angstrom) for local
-            uncertainty aggregation
+        element_mapping: Dict mapping atom type numbers to element symbols,
+            applied when converting the raw LAMMPS dump to
+            ``out/trajectory.extxyz``.
         remote_lammps_executable_path: Path to the LAMMPS executable on the
             remote machine
         sampling_script: Remote payload; defaults to the shipped
@@ -86,13 +139,39 @@ class LammpsSampler(Sampler):
         remote_savepath: Path on the remote machine for calculation files
         loop_time: Interval (seconds) to poll for job completion
         lammps_args: LAMMPS accelerator/package flags for the ``lmp`` command
-            (inserted between ``-in`` and ``-log``). Defaults to KOKKOS-on-GPU;
-            pass a CPU variant (or "") for a non-GPU build.
-        device: torch device for the MACE committee scoring ("cuda" or "cpu").
+            (inserted between ``-in`` and ``-log``). Defaults to KOKKOS-on-GPU
+            (paired with the default ``lammps_pair_style="mliap"``);
+            ``lammps_pair_style="mace"`` needs none of these on a CPU-only
+            build, so pass "" there.
+        lammps_pair_style: For ``backend="mace"``: ``"mliap"`` (default,
+            production KOKKOS-on-GPU) or ``"mace"`` (CPU-testable, opt-in --
+            see the module docstring). For ``backend="ace"``/``"grace"``:
+            the literal LAMMPS pair_style line rendered into the template
+            (e.g. ``"pace"`` or ``"grace pad_verbose padding 0.1"`` -- these
+            need no compile step, unlike MACE).
         enable_cueq: Convert the MACE model to cuequivariance before compiling
-            it for LAMMPS (production default). Set False to compile the plain
-            e3nn model without the cuequivariance requirement (CPU builds).
-        stub: Dry-run without a cluster; emit mock samples for testing
+            it for LAMMPS (production default). Only used when
+            ``backend="mace"`` and ``lammps_pair_style="mliap"``.
+        backend: Which committee-potential family drives the MD's first
+            (driving) member: ``"mace"`` (default), ``"ace"`` (pacemaker),
+            or ``"grace"`` (gracemaker) -- see ``lammps_sampling.py``'s
+            module docstring.
+        dump_frequency: Steps between dumped MD frames, rendered into the
+            LAMMPS template as ``{{ dump_frequency }}``. ``None`` (default)
+            falls back to every step at render time -- fine for small
+            systems, but for large ones (hundreds of thousands of atoms)
+            this can produce a huge dump file in minutes; set explicitly for
+            those.
+        continue_from_previous: Start each iteration's MD from the final
+            frame of the most recent earlier iteration's run (the
+            template's ``write_data {{ final_data_file }}`` output, collected
+            under ``<iteration>/sample/results/out/``) instead of always
+            restarting from ``data_path``. Falls back to ``data_path`` when
+            no earlier iteration has one (e.g. the first sampling
+            iteration). An explicit ``struct`` schedule kwarg still wins.
+            An iteration whose run was halted early (``fix halt``, see
+            ``lammps_sampling.py``) has no final frame and is skipped.
+        stub: Dry-run without a cluster; emit a mock trajectory for testing
     """
 
     def __init__(
@@ -101,18 +180,18 @@ class LammpsSampler(Sampler):
         template_path: os.PathLike,
         data_path: os.PathLike,
         element_mapping: Optional[dict] = None,
-        num_samples: Optional[int] = None,
-        uncertainty_cutoff_radius: Optional[float] = None,
         remote_lammps_executable_path: os.PathLike = "lmp",
         sampling_script: Optional[os.PathLike] = None,
         remote_savepath: Optional[os.PathLike] = None,
         loop_time: float = 30,
         lammps_args: str = "-k on g 1 -sf kk -pk kokkos newton on neigh half",
-        device: str = "cuda",
+        lammps_pair_style: str = "mliap",
         enable_cueq: bool = True,
+        backend: str = "mace",
         stub: bool = False,
         cluster_config: Optional[ClusterConfig] = None,
-        sampling_frequency: Optional[int] = None,
+        dump_frequency: Optional[int] = None,
+        continue_from_previous: bool = False,
     ):
         super().__init__()
         if sampling_script is None:
@@ -121,14 +200,15 @@ class LammpsSampler(Sampler):
         self.sampling_script = sampling_script
         self.template_path = template_path
         self.data_path = data_path
+        self.initial_data_path = data_path
+        self.continue_from_previous = continue_from_previous
         self.element_mapping = element_mapping
-        self.num_samples = num_samples
-        self.sampling_frequency = sampling_frequency
-        self.uncertainty_cutoff_radius = uncertainty_cutoff_radius
+        self.dump_frequency = dump_frequency
         self.remote_lammps_executable_path = remote_lammps_executable_path
         self.lammps_args = lammps_args
-        self.device = device
+        self.lammps_pair_style = lammps_pair_style
         self.enable_cueq = enable_cueq
+        self.backend = backend
         self.remote_savepath = remote_savepath
         self.loop_time = loop_time
         self.cluster_config = cluster_config
@@ -147,12 +227,11 @@ class LammpsSampler(Sampler):
             "lammps_config_name": "lammps.in",
             "seed": int(np.random.randint(1e6)),
             "lammps_args": self.lammps_args,
-            "device": self.device,
+            "lammps_pair_style": self.lammps_pair_style,
             "enable_cueq": self.enable_cueq,
-            "bin_count": self.num_samples,
-            "cutoff_radius": self.uncertainty_cutoff_radius,
+            "backend": self.backend,
             "element_mapping": self.element_mapping,
-            "sampling_frequency": self.sampling_frequency,
+            "dump_frequency": self.dump_frequency,
         }
 
     def update(
@@ -161,9 +240,11 @@ class LammpsSampler(Sampler):
         """Prepare (and stage) the LAMMPS run for this AL iteration.
 
         Schedule ``**kwargs`` are merged into the payload's input JSON,
-        overriding the defaults. Keys such as
-        ``temperature``/``timestep``/``n_run`` are forwarded verbatim so the
-        payload can fill the LAMMPS template with them.
+        overriding the defaults. Keys matching one of ``LammpsSampler``'s
+        own script-input fields override that field; any other key (e.g. a
+        ``Schedule``'s ``temperature``/``timestep``/``n_run``) is forwarded
+        via ``extra_template_kwargs`` so the payload can fill the LAMMPS
+        template with it.
 
         Args:
             calcdir: Directory for this AL iteration
@@ -182,32 +263,26 @@ class LammpsSampler(Sampler):
 
         if "struct" in kwargs:
             self.data_path = kwargs["struct"]
+        elif self.continue_from_previous:
+            self.data_path = self._previous_final_data(calcdir)
 
         # In stub mode we don't stage a remote task.
         if self.stub:
             return
 
         script_input = self._load_default_settings()
-        for key in kwargs.keys():
-            script_input[key] = kwargs[key]
+        extra_template_kwargs = {}
+        for key, value in kwargs.items():
+            if key == "struct":
+                continue
+            if key in _KNOWN_SCRIPT_INPUT_KEYS:
+                script_input[key] = value
+            else:
+                extra_template_kwargs[key] = value
+        script_input["extra_template_kwargs"] = extra_template_kwargs
         for key in list(script_input.keys()):
             if isinstance(script_input[key], Path):
                 script_input[key] = str(script_input[key].name)
-
-        # num_samples (bin_count) takes precedence over sampling_frequency, as
-        # in the previous behaviour. Warn so the user knows which one won.
-        if (
-            script_input.get("bin_count") is not None
-            and script_input.get("sampling_frequency") is not None
-        ):
-            logger.warning(
-                "Both num_samples (%s) and sampling_frequency (%s) were "
-                "specified; using num_samples (previous behavior) and "
-                "ignoring sampling_frequency.",
-                script_input["bin_count"],
-                script_input["sampling_frequency"],
-            )
-            script_input.pop("sampling_frequency", None)
 
         self.script_input_file = self.results_dir / "input_sample.json"
         with open(self.script_input_file, "w") as f:
@@ -236,25 +311,59 @@ class LammpsSampler(Sampler):
         for p in self.model_files:
             self.sampling_task.copy_file(p)
 
-    def _create_stub_outputs(self, num_samples: int = None) -> list[Atoms]:
-        """Create mock LAMMPS sampling outputs for testing.
+    def _previous_final_data(self, calcdir: Path) -> os.PathLike:
+        """The final-frame data file of the most recent earlier iteration
+        (sibling calcdirs named by iteration number), or ``data_path`` if
+        there is none."""
+        calcdir = Path(calcdir)
+        if not calcdir.name.isdigit():
+            return self.initial_data_path
+        current = int(calcdir.name)
+        earlier = sorted(
+            (
+                int(d.name)
+                for d in calcdir.parent.iterdir()
+                if d.is_dir() and d.name.isdigit() and int(d.name) < current
+            ),
+            reverse=True,
+        )
+        for iteration in earlier:
+            path = (
+                calcdir.parent
+                / str(iteration)
+                / "sample"
+                / "results"
+                / "out"
+                / FINAL_DATA_NAME
+            )
+            if path.is_file():
+                logger.info(
+                    "Continuing MD from iteration %d's final frame: %s",
+                    iteration,
+                    path,
+                )
+                return path
+        logger.info(
+            "No earlier iteration's final frame found; starting MD from %s",
+            self.initial_data_path,
+        )
+        return self.initial_data_path
 
-        Generates a fake MD trajectory with realistic uncertainty scores.
+    def _create_stub_outputs(self, num_frames: int = 10) -> list[Atoms]:
+        """Create a mock LAMMPS trajectory for testing.
 
         Args:
-            num_samples: Number of samples to generate (uses self.num_samples
-                if None)
+            num_frames: Number of trajectory frames to generate
 
         Returns:
-            List of Atoms objects with mock uncertainties
+            List of Atoms objects (no uncertainty -- this sampler no longer
+            scores anything; see
+            ``lammps_al.select.selector.CommitteeUncertaintySelector``)
         """
-        if num_samples is None:
-            num_samples = self.num_samples
+        logger.info(f"Creating {num_frames} stub LAMMPS trajectory frames")
 
-        logger.info(f"Creating {num_samples} stub LAMMPS samples")
-
-        mock_samples = []
-        for i in range(num_samples):
+        mock_frames = []
+        for i in range(num_frames):
             # Create mock Cu/Co surface structure
             symbols = ["Cu"] * 20 + ["Co"] * 4 + ["H"] * 2
             positions = np.random.uniform(0, 10, (len(symbols), 3))
@@ -265,32 +374,28 @@ class LammpsSampler(Sampler):
                 cell=[10, 10, 15],
                 pbc=True,
             )
-
-            # Add mock uncertainty scores
-            atoms.info["max_uncertainty"] = np.random.uniform(0.1, 2.0)
-            atoms.info["mean_uncertainty"] = np.random.uniform(0.05, 1.0)
             atoms.info["step"] = i * 100
 
-            mock_samples.append(atoms)
+            mock_frames.append(atoms)
 
-        return mock_samples
+        return mock_frames
 
     def get_sampled_configs(self) -> Path:
-        """Run LAMMPS sampling and collect configurations.
+        """Run LAMMPS sampling and collect the resulting trajectory.
 
         Returns:
-            Path to the XYZ file containing sampled configurations
+            Path to the extxyz file containing the MD trajectory
         """
         if self.stub:
-            # In stub mode, create mock outputs directly
-            logger.info("Running in stub mode - creating mock LAMMPS samples")
-            sampled_configs = self._create_stub_outputs()
-            output_path = self.results_dir / "out" / "samples.xyz"
-            os.makedirs(output_path.parent, exist_ok=True)
-            ase.io.write(output_path, sampled_configs)
+            # In stub mode, create a mock trajectory directly
             logger.info(
-                f"Sampled configurations written to {output_path}"
+                "Running in stub mode - creating mock LAMMPS trajectory"
             )
+            trajectory = self._create_stub_outputs()
+            output_path = self.results_dir / "out" / "trajectory.extxyz"
+            os.makedirs(output_path.parent, exist_ok=True)
+            ase.io.write(output_path, trajectory)
+            logger.info(f"Trajectory written to {output_path}")
             return output_path
         else:
             # Run actual LAMMPS sampling
@@ -304,8 +409,9 @@ class LammpsSampler(Sampler):
             self.sampling_task.collect_results()
 
             output_path = (
-                    Path(self.sampling_task.local_savepath) / "out/samples.xyz"
-                )
+                Path(self.sampling_task.local_savepath)
+                / "out/trajectory.extxyz"
+            )
 
-        logger.info(f"Sampled configurations written to {output_path}")
+        logger.info(f"Trajectory written to {output_path}")
         return output_path

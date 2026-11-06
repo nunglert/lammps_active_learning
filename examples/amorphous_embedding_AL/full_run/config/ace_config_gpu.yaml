@@ -1,0 +1,96 @@
+cutoff: 7.0 # cutoff for neighbour list construction
+seed: 42  # random seed
+
+#################################################################
+## Metadata section
+#################################################################
+metadata:
+  origin: "Automatically generated input"
+
+#################################################################
+## Potential definition section
+#################################################################
+potential:
+  deltaSplineBins: 0.001
+  elements: ['Cu', 'H', 'O']
+
+  embeddings:
+    ALL: {
+      npot: 'FinnisSinclairShiftedScaled',
+      fs_parameters: [ 1, 1, 1, 0.5, 1, 0.25, 1, 0.75, 1, 2, 1, 0.875, 1, 0.375, 1, 0.125, 1, 0.625 ],
+      ndensity: 9,
+    }
+
+  bonds:
+    ALL: {
+      radbase: SBessel,
+      radparameters: [ 5.25 ],
+      rcut: 7.0,
+      dcut: 0.01,
+      NameOfCutoffFunction: cos,
+    }
+
+  functions:
+    number_of_functions_per_element: 300
+    UNARY:   { nradmax_by_orders: [ 15, 6, 4, 3, 2, 2 ], lmax_by_orders: [ 0 , 3, 3, 2, 2, 1 ]}
+    BINARY:  { nradmax_by_orders: [ 15, 6, 3, 2, 2, 1 ], lmax_by_orders: [ 0 , 3, 2, 1, 1, 0 ]}
+    TERNARY: { nradmax_by_orders: [ 15, 3, 3, 2, 1 ],    lmax_by_orders: [ 0 , 2, 2, 1, 1 ], }
+    ALL:     { nradmax_by_orders: [ 15, 3, 2, 1, 1 ],    lmax_by_orders: [ 0 , 2, 2, 1, 1 ] }
+
+
+#################################################################
+## Dataset specification section
+#################################################################
+# filename/test_size are injected by remote_handler's
+# merge_ace_config_with_paths at run time (from the actual database.
+# validation_fraction) -- only reference_energy needs to live here. See
+# ../config/ace_config.yaml's own comment on why test_filename must NOT be
+# set here (crashes pyace's/tensorpot's load with FileNotFoundError
+# otherwise -- same loader path for both backends).
+data:
+  reference_energy: {H: -0.1806819499186884, O: -0.09057893451085552, Cu: -0.03618404}
+
+#################################################################
+## Fit specification section
+#################################################################
+fit:
+  loss: { kappa: 0.99, L1_coeffs: 1e-8,  L2_coeffs: 1e-8}
+  # if kappa: auto, then it will be determined from the variation of energy per atom and forces norms in train set
+
+  optimizer: BFGS # or L-BFGS-B
+
+  ## maximum number of minimize iterations
+  maxiter: 1000
+
+  ## additional options for scipy.minimize
+  #  options: {maxcor: 100}
+
+#################################################################
+## Backend specification section
+#################################################################
+# tensorpot = TensorFlow-based, GPU-accelerated (pacemaker's own docs:
+# "Default behavior of pacemaker is to utilize a GPU accelerated fitting of
+# ACE using tensorpotential"). Needs the OLD, pre-GRACE-rename
+# tensorpotential API (github.com/ICAMS/TensorPotential, installed via
+# remote_handler's/lammps_al's own `ace_tensorpot_gpu` extra, --no-deps'd
+# past its stale numpy<=1.26.4/pandas<=2.0 pins in redistribute_lammps_al.sh
+# -- confirmed those pins are just stale, not a real incompatibility, by
+# importing all five symbols pyace's tensorpot backend needs against
+# numpy 2.2.6/pandas 2.3.3 on musica's ace_gpu_train env) -- NOT the current
+# PyPI `tensorpotential` (0.6.x, GRACE-focused, incompatible API -- see
+# build/TENSORPOT_ACE_INCOMPATIBILITY.md). Mutually exclusive with [grace]
+# in the same env, hence the dedicated ace_gpu_train env this trainer now
+# runs in (see run_al.py's module docstring).
+#
+# n_workers/parallel_mode (../ace_config.yaml's pyace-specific knobs to
+# avoid oversubscribing multiprocessing.cpu_count() workers) don't apply
+# here -- tensorpot's GPU path has no such worker pool.
+#
+# STATUS (2026-09-10): the five tensorpot symbols import cleanly in
+# ace_gpu_train; a REAL minimal fit (pyace + tensorpotential actually
+# constructing/training a model together, not just importing) has not yet
+# been run -- see build/test_ace_gpu_training.py. Run that diagnostic
+# before trusting this config for a real (expensive, unattended) campaign
+# iteration.
+backend:
+  evaluator: tensorpot

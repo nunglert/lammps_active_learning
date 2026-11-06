@@ -10,16 +10,21 @@ boundary    p p p
 read_data   {{ data_file }}
 
 
+{% if lammps_pair_style == "mace" %}
+pair_style  mace
+pair_coeff  * * ${model_file} O Sr Ti
+{% else %}
 pair_style  mliap unified ${model_file} 0
 pair_coeff  * * O Sr Ti
+{% endif %}
 
 
-velocity    all create {{ temperature }} {{ seed }} dist gaussian rot yes mom yes sum yes
+velocity    all create {{ temperature }} {{ seed }} dist gaussian rot yes mom yes sum no
 
 thermo          100
 thermo_style    custom step temp etotal press
 
-dump    d_nvt   all custom 1 {{ dump_file }} id type xu yu zu vx vy vz
+dump    d_nvt   all custom {{ dump_frequency }} {{ dump_file }} id type xu yu zu vx vy vz
 
 #########################################################
 #Equilibrate everything at room temperature        

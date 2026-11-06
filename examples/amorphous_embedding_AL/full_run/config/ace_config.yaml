@@ -1,0 +1,119 @@
+cutoff: 7.0 # cutoff for neighbour list construction
+seed: 42  # random seed
+
+#################################################################
+## Metadata section
+#################################################################
+metadata:
+  origin: "Automatically generated input"
+
+#################################################################
+## Potential definition section
+#################################################################
+potential:
+  deltaSplineBins: 0.001
+  elements: ['Cu', 'H', 'O']
+
+  embeddings:
+    ALL: {
+      npot: 'FinnisSinclairShiftedScaled',
+      fs_parameters: [ 1, 1, 1, 0.5, 1, 0.25, 1, 0.75, 1, 2, 1, 0.875, 1, 0.375, 1, 0.125, 1, 0.625 ],
+      ndensity: 9,
+    }
+
+  bonds:
+    ALL: {
+      radbase: SBessel,
+      radparameters: [ 5.25 ],
+      rcut: 7.0,
+      dcut: 0.01,
+      NameOfCutoffFunction: cos,
+    }
+
+  functions:
+    number_of_functions_per_element: 300
+    UNARY:   { nradmax_by_orders: [ 15, 6, 4, 3, 2, 2 ], lmax_by_orders: [ 0 , 3, 3, 2, 2, 1 ]}
+    BINARY:  { nradmax_by_orders: [ 15, 6, 3, 2, 2, 1 ], lmax_by_orders: [ 0 , 3, 2, 1, 1, 0 ]}
+    TERNARY: { nradmax_by_orders: [ 15, 3, 3, 2, 1 ],    lmax_by_orders: [ 0 , 2, 2, 1, 1 ], }
+    ALL:     { nradmax_by_orders: [ 15, 3, 2, 1, 1 ],    lmax_by_orders: [ 0 , 2, 2, 1, 1 ] }
+
+
+#################################################################
+## Dataset specification section
+#################################################################
+# filename/test_size are injected by remote_handler's
+# merge_ace_config_with_paths at run time (from the actual database.
+# validation_fraction) -- only reference_energy needs to live here.
+# Deliberately NO "test_filename" key: erhard2026's own copy of this config
+# (data/Potentials/Potentials/ACE_7_300/input_1.yaml) has one
+# ("../../total_testset.1.pckl.gzip"), a relative path that only resolved in
+# *their* directory layout. merge_ace_config_with_paths doesn't strip an
+# already-present test_filename, and pacemaker prioritizes loading a named
+# test_filename over test_size-based splitting when both are set -- so
+# copying that key verbatim crashes with FileNotFoundError the moment
+# training actually runs (confirmed: first real run, 2026-09-09). Omit it
+# entirely so pacemaker auto-splits via test_size instead.
+data:
+  reference_energy: {H: -0.1806819499186884, O: -0.09057893451085552, Cu: -0.03618404}
+
+#################################################################
+## Fit specification section
+#################################################################
+fit:
+  loss: { kappa: 0.99, L1_coeffs: 1e-8,  L2_coeffs: 1e-8}
+  # if kappa: auto, then it will be determined from the variation of energy per atom and forces norms in train set
+
+
+
+  optimizer: BFGS # or L-BFGS-B
+
+  ## maximum number of minimize iterations
+  maxiter: 1000
+
+  ## additional options for scipy.minimize
+  #  options: {maxcor: 100}
+
+  ## Automatically find the smallest interatomic distance in dataset  and set inner cutoff for ZBL to it
+  #repulsion: auto
+
+  #  ladder_step: 100
+  #  ladder_type: power_order
+
+  # Early stopping
+  # min_relative_train_loss_per_iter: 5e-5
+  # min_relative_test_loss_per_iter: 1e-5
+  # early_stopping_patience: 200
+
+#################################################################
+## Backend specification section
+#################################################################
+# erhard2026's own config used "tensorpot" (TensorFlow-based, via the
+# tensorpotential package). That needs tensorpotential.potentials.ace,
+# which does not exist in tensorpotential 0.6.1 (the version pulled in by
+# remote_handler's [grace] extra -- confirmed on musica: `import
+# tensorpotential.potentials; dir(...)` has no "ace", only "presets"/
+# "registry" -- ACE-via-tensorpot needs a newer/different tensorpotential
+# than what's installed) -- crashed the second real run with
+# ModuleNotFoundError: No module named 'tensorpotential.potentials.ace'
+# (2026-09-09). "pyace" is pacemaker's native C++ evaluator (no TensorFlow
+# dependency) and is remote_handler's own default when a config leaves
+# `backend` unset (merge_ace_config_with_paths) -- switched to it here
+# instead of chasing a tensorpotential version bump. batch_size/
+# display_step were tensorpot's own training-loop knobs and don't apply to
+# pyace, so they're dropped rather than left as dead config.
+backend:
+  evaluator: pyace
+  parallel_mode: process
+  # Third run (2026-09-09) sat stuck at BFGS iteration 0 for 2+ hours with
+  # zero further log output. Root cause, confirmed by reading pyace's own
+  # source on musica (paralleldataexecutor.py): with n_workers unset, it
+  # falls back to `multiprocessing.cpu_count()`, which reads the whole
+  # *physical node's* CPU count (384 -- a shared H100x4 node), not what
+  # SLURM actually allocated to our job (`scontrol show job`: CPUs/Task=22).
+  # 384 process-pool workers thrashing on a ~22-core allocation, each
+  # carrying its own overhead, is why nothing progressed -- not that the
+  # fit is inherently slow (one single-threaded loss+force evaluation over
+  # the whole 354712-atom training set is ~11.5s per the INIT STATS log's
+  # own "32.34 mcs/at" timing). Pin it explicitly, safely under the
+  # allocated 22 to leave the main process some headroom.
+  n_workers: 16

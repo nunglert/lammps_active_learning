@@ -1,6 +1,8 @@
-# Minimal MACE-MLIAP smoke run: a handful of NVT steps, dumping every step so
-# the sampler has a short trajectory to segment. Mirrors the production example
-# template (pair_style mliap unified + a mace mliap model) but with run 5.
+# Minimal MACE smoke run: a handful of NVT steps, dumping every step so the
+# sampler has a short trajectory to segment. Mirrors the production example
+# template but with run 5. lammps_pair_style selects the driving potential:
+# "mliap" (default, production KOKKOS-on-GPU) or "mace" (CPU-testable,
+# what this file is normally rendered with in CI/local runs).
 variable    dt equal 0.002
 variable model_file index {{ model_file }}
 
@@ -12,15 +14,20 @@ boundary    p p p
 
 read_data   {{ data_file }}
 
+{% if lammps_pair_style == "mace" %}
+pair_style  mace
+pair_coeff  * * ${model_file} Co Cu H O
+{% else %}
 pair_style  mliap unified ${model_file} 0
 pair_coeff  * * Co Cu H O
+{% endif %}
 
 mass        1       58.933
 mass        2       63.546
 mass        3       1.008
 mass        4       15.999
 
-velocity    all create 300 {{ seed }} dist gaussian rot yes mom yes sum yes
+velocity    all create 300 {{ seed }} dist gaussian rot yes mom yes sum no
 
 thermo          1
 thermo_style    custom step temp etotal press

@@ -1,17 +1,27 @@
 """Active learning workflow: LAMMPS MD sampling with a MACE committee.
 
-A Cu/Co/H/O surface active-learning loop with three actors:
-  1. Sampling:   ``LammpsSampler`` (this package) runs LAMMPS MD driven by the
-                 first committee model (compiled to the MLIAP interface), scores
-                 every frame's local force-uncertainty across the committee, and
-                 returns the most-uncertain frame of each trajectory segment.
-  2. Evaluation: ``VASPEvaluator`` (remote_handler) runs DFT single-points on
-                 the sampled structures for ground-truth energies/forces.
-  3. Training:   ``MaceModelTrainer`` (remote_handler) retrains the MACE
-                 committee on the accumulated DFT database.
+A Cu/Co/H/O surface active-learning loop with five actors:
+  1. Sampling:    ``LammpsSampler`` (this package) runs LAMMPS MD driven by
+                  the first committee model (compiled to the MLIAP
+                  interface) and returns the resulting trajectory. No
+                  scoring/selection.
+  2. Annotation:  ``CommitteeUncertaintySelector`` (this package) scores
+                  every frame's local force-uncertainty across the
+                  committee and returns the whole trajectory annotated --
+                  no reduction. Split out of the sampler; see
+                  ``lammps_al.select.selector``'s module docstring.
+  3. Selection:   ``PeakUncertaintySelector`` (this package, host-side, no
+                  cluster job) picks the peak-uncertainty frame from each
+                  of a few trajectory segments.
+  4. Evaluation:  ``VASPEvaluator`` (remote_handler) runs DFT single-points
+                  on the sampled structures for ground-truth
+                  energies/forces.
+  5. Training:    ``MaceModelTrainer`` (remote_handler) retrains the MACE
+                  committee on the accumulated DFT database.
 
 The loop seeds from an existing committee + DFT database and then repeats
-  sampling -> evaluation -> training -> sampling -> ...
+  sampling -> annotation -> selection -> evaluation -> training -> sampling
+  -> ...
 with the freshly trained committee driving the next round of MD.
 
 Concrete samplers live in the *project*, not the orchestrator: the sampler
@@ -40,11 +50,20 @@ from pathlib import Path
 from remote_handler import configure_logging
 from remote_handler.core.cluster_handler import ClusterConfig
 from remote_handler.core.file_handler import RemoteFileSystem
-from remote_handler.workflows import Stage, StagedActiveLearningHandler
+from remote_handler.workflows import (
+    InputSource,
+    SelectorActor,
+    Stage,
+    StagedActiveLearningHandler,
+)
 from remote_handler.workflows.evaluators import VASPEvaluator
 from remote_handler.workflows.trainers import MaceModelTrainer
 
 from lammps_al.run.sampler import LammpsSampler
+from lammps_al.select.selector import (
+    CommitteeUncertaintySelector,
+    PeakUncertaintySelector,
+)
 
 configure_logging()  # timestamped logs (level=INFO -> stdout)
 
@@ -105,13 +124,40 @@ lammps_sampler = LammpsSampler(
     template_path=lammps_template,
     data_path=lammps_data,
     element_mapping={1: "Co", 2: "Cu", 3: "H", 4: "O"},
-    num_samples=2,
-    uncertainty_cutoff_radius=4.0,
     remote_lammps_executable_path=Path(
         "/home/e12218283/software/lammps/build-mliap/lmp"
     ),
     remote_savepath=Path("/home/e12218283/dump/remote_handler"),
     loop_time=30,
+)
+
+# ---------------------------------------------------------------------------
+# 1b. Selector: CommitteeUncertaintySelector (annotate, no reduction)
+# ---------------------------------------------------------------------------
+# Split out of LammpsSampler -- see lammps_al.select.selector's module
+# docstring. Its committee (model_files, via extra_inputs below) comes from
+# "trainer", the same producer that already feeds the sampler stage's own
+# primary ring input (initial_input=model_files at iteration 0). Returns the
+# whole annotated trajectory -- peak-frame reduction is a separate,
+# host-side step next (this campaign, unlike rough_cu_water_al, has no
+# further spatial-selection stage, so it needs that reduction explicitly).
+committee_selector = CommitteeUncertaintySelector(
+    remote_fs=gpu_fs,
+    cluster_config=gpu_cluster_config,
+    cutoff_radius=4.0,
+    remote_savepath=Path("/home/e12218283/dump/remote_handler"),
+    loop_time=30,
+)
+
+# ---------------------------------------------------------------------------
+# 1c. Selector: PeakUncertaintySelector (host-side peak-frame reduction)
+# ---------------------------------------------------------------------------
+# Pure numpy over already-annotated frames -- no cluster job, no committee.
+# Wrapped in remote_handler's SelectorActor (the same adapter STO's
+# RandomSelector uses) to slot in as a Stage.
+peak_selector = SelectorActor(
+    PeakUncertaintySelector(bin_count=2),
+    output_filename="peak_samples.extxyz",
 )
 
 # ---------------------------------------------------------------------------
@@ -166,16 +212,24 @@ mace_trainer = MaceModelTrainer(
 # seeds its *first* iteration, and ``combine=True`` accumulates a stage's
 # outputs across iterations before the next stage consumes them.
 #
-# Chain (cyclic): sampler -> evaluator -> trainer -> (next iter) sampler.
+# Chain (cyclic): sampler -> uncertainty_select -> peak_select -> evaluator
+# -> trainer -> (next iter) sampler.
 #   - sampler seed = the starting committee (it needs a model to run MD).
+#   - uncertainty_select scores the sampler's trajectory against the same
+#     committee (pulled via extra_inputs from "trainer", the same producer
+#     that seeds the sampler stage itself) and returns it fully annotated
+#     -- no reduction. See lammps_al.select.selector's module docstring for
+#     why annotation and reduction are two separate stages now (this used
+#     to be folded into LammpsSampler alone).
+#   - peak_select (host-side, no cluster) picks the peak-uncertainty frame
+#     from each of ``bin_count`` segments -- this campaign hands whole
+#     configs straight to DFT with no further spatial-selection stage, so
+#     it needs that reduction explicitly (unlike rough_cu_water_al's
+#     ROIExtractor, which consumes the full annotated trajectory directly).
 #   - evaluator combines its outputs, so the trainer trains on the *whole*
 #     accumulated DFT set, not just the latest batch.
 #   - trainer seed = the starting DFT database; its outputs are ``.model``
 #     committees that drive the next round of MD.
-#
-# To thin the candidate pool, insert a Stage("selector", SelectorActor(...))
-# between sampler and evaluator; here the LammpsSampler already emits
-# ``num_samples`` candidates, so no selector stage is used.
 stages = [
     Stage(
         name="sampler",
@@ -183,6 +237,26 @@ stages = [
         combine=False,
         output_extension="extxyz",
         initial_input=model_files,
+    ),
+    Stage(
+        name="uncertainty_select",
+        actor=committee_selector,
+        combine=False,
+        output_extension="extxyz",
+        extra_inputs={
+            "model_files": InputSource(
+                stage="trainer",
+                accumulate=False,
+                include_current=False,
+                initial=model_files,
+            )
+        },
+    ),
+    Stage(
+        name="peak_select",
+        actor=peak_selector,
+        combine=False,
+        output_extension="extxyz",
     ),
     Stage(
         name="evaluator",

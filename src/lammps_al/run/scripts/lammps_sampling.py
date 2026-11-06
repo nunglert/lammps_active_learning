@@ -1,17 +1,58 @@
-"""Cluster-side LAMMPS committee-uncertainty sampling payload.
+"""Cluster-side LAMMPS MD sampling payload (no committee scoring).
 
-Runs one LAMMPS MD trajectory driven by a MACE model, scores every frame's
-local force-uncertainty across the committee, and writes the most-uncertain
-frame of each trajectory segment to ``out/samples.xyz``.
+Runs one LAMMPS MD trajectory driven by the committee's first model and
+converts the raw dump into a proper ``out/trajectory.extxyz`` (correct
+chemical symbols applied via ``element_mapping``). This is the "generate
+dynamics" half of what used to be one combined sampler payload -- scoring
+every frame's local force-uncertainty across the committee and selecting
+peak-uncertainty frames is a separate remote job/actor now, see
+``lammps_al.select.scripts.committee_selection`` and
+``lammps_al.select.selector.CommitteeUncertaintySelector``.
+
+Backend-generic over the committee's potential family
+(``LammpsSamplingInput.backend``: ``"mace"``, ``"ace"``, or ``"grace"``) --
+only the compile step is backend-specific; template rendering and the
+LAMMPS run are shared. ACE's native ``pair_style pace`` and GRACE's native
+``pair_style grace`` read their potential file/directory directly (no
+compile step, unlike MACE).
+
+For ``backend="mace"``, two LAMMPS/MACE coupling routes are chosen per run
+via ``LammpsSamplingInput.lammps_pair_style``:
+
+* ``"mliap"`` (**default, production**) -- the ML-IAP Python bridge
+  (``pair_style mliap unified``, ``LAMMPS_MLIAP_MACE``, pickled with
+  ``torch.save``). This is what the KOKKOS-on-GPU production setup targets.
+* ``"mace"`` (**CPU-testable, opt-in**) -- LAMMPS's native ``pair_style mace``
+  (the ``ML-MACE`` package, built against LibTorch directly,
+  ``LAMMPS_MACE``/TorchScript-compiled). For any MACE model with more than
+  one interaction layer (i.e. essentially all real models), the ML-IAP route
+  needs LAMMPS's ghost-atom message-passing hooks
+  (``forward_exchange``/``reverse_exchange``), which are Kokkos-CUDA-only --
+  confirmed by building both the ACEsuit LAMMPS fork and vanilla upstream
+  ``develop`` and hitting ``AttributeError: ... no attribute
+  'forward_exchange'`` on CPU (Kokkos-OpenMP or no-Kokkos) either way. The
+  ``"mace"`` route has no such limitation and is what the CPU-only
+  ``lammps-smoke`` CI job (and local `docker run` parity, see
+  ``docker/Dockerfile.lammps-mace``) uses -- it is **not** meant to replace
+  the production route, only to make the payload testable without a GPU.
 
 Shipped and executed on the cluster by
 :class:`lammps_al.run.sampler.LammpsSampler` -- it is not imported as a module
 in the normal flow (``main`` runs it from ``sys.argv``), but its functions are
 import-safe so they can be unit-tested. The heavy ``torch`` / ``mace`` imports
-are done lazily inside the two functions that need them, so the pure helpers
-(``parse_jinja_template``, ``aggregate_uncertainties``,
-``select_max_uncertainty_frames``) import with only ``ase`` + ``numpy`` +
-``jinja2`` present -- no MACE stack, no LAMMPS, no GPU.
+are done lazily inside the functions that need them, so the pure helper
+(``parse_jinja_template``) imports with only ``ase`` + ``numpy`` + ``jinja2``
+present -- no MACE stack, no LAMMPS, no GPU.
+
+A template can stop an unstable run early with ``fix ... halt ... error
+soft`` (e.g. when one atom's kinetic energy or force runs away). LAMMPS then
+ends the ``run`` cleanly and the deck carries on to its ``write_data``; this
+payload spots the halt in the log (``Fix halt condition ...``), appends that
+halt-time state to the trajectory as its last frame -- the configuration the
+potential failed on -- and keeps it as ``out/halted_final.data`` instead of
+``out/surface_final.data``, so ``continue_from_previous`` does not start the
+next iteration from a blown-up state. ``out/md_halted.info`` records the
+halt message.
 """
 
 import logging
@@ -19,33 +60,21 @@ import os
 import pathlib
 import subprocess
 import sys
-import warnings
 from pathlib import Path
 from typing import Any, Optional
 
-import ase.geometry
 import ase.io
 import jinja2
-import numpy as np
 
 # ``LammpsSamplingInput`` (and thus ``remote_handler``) is imported lazily in
-# ``main`` so the pure helpers below import with only ase + numpy + jinja2.
+# ``main`` so the pure helper below imports with only ase + numpy + jinja2.
 
-# Default LAMMPS accelerator flags: KOKKOS on one GPU (production default).
-# CPU runs (e.g. CI) override this via LammpsSamplingInput.lammps_args, e.g.
-# "" or "-k on t 2 -sf kk -pk kokkos newton on neigh half" for an OpenMP build.
+# Default LAMMPS accelerator flags: KOKKOS on one GPU (production default,
+# paired with lammps_pair_style="mliap"). CPU runs (e.g. CI, via
+# lammps_pair_style="mace") override this via LammpsSamplingInput.lammps_args
+# -- "" is the right override there, since `pair_style mace` needs no
+# accelerator flags at all on a CPU-only build.
 DEFAULT_LAMMPS_ARGS = "-k on g 1 -sf kk -pk kokkos newton on neigh half"
-
-
-def _cuet_available() -> bool:
-    """Whether cuequivariance(_torch) is importable (enables cueq in MACE)."""
-    try:
-        import cuequivariance  # noqa: F401
-        import cuequivariance_torch  # noqa: F401
-
-        return True
-    except ImportError:
-        return False
 
 
 def parse_jinja_template(
@@ -78,7 +107,10 @@ def create_lammps_mliap_model(
     out_path: Optional[pathlib.Path] = None,
     enable_cueq: bool = True,
 ) -> Optional[pathlib.Path]:
-    """Compile a MACE model for use in LAMMPS
+    """Compile a MACE model for LAMMPS's ML-IAP Python bridge
+    (``pair_style mliap unified``) -- the **production** (KOKKOS-on-GPU)
+    route. See the module docstring for why the CPU-testable alternative is
+    :func:`create_lammps_mace_model`, not this function.
 
     Args:
         model_path: Path to the trained MACE model
@@ -119,11 +151,13 @@ def create_lammps_mliap_model(
         heads = [None]
 
     if len(heads) == 1:
-        print(f"Only one head found in the model: {heads[0]}. Skipping selection.")
+        print(
+            f"Only one head found in the model: {heads[0]}. Skipping selection."
+        )
         head = heads[0]
     else:
         head = "Default" if head is None else head
-        
+
     if float32:
         model = model.float().to("cpu")
     else:
@@ -136,6 +170,78 @@ def create_lammps_mliap_model(
     model.lammps_mliap = True
     lammps_model = LAMMPS_MLIAP_MACE(model, head=head)
     torch.save(lammps_model, compiled_path.resolve())
+    return compiled_path if do_return_path else None
+
+
+def create_lammps_mace_model(
+    model_path: pathlib.Path,
+    head: Optional[str] = None,
+    float32: bool = False,
+    do_return_path: bool = False,
+    out_path: Optional[pathlib.Path] = None,
+) -> Optional[pathlib.Path]:
+    """Compile a MACE model into a TorchScript module for LAMMPS's native
+    ``pair_style mace`` (the ``ML-MACE`` package) -- the CPU-testable, opt-in
+    ``lammps_pair_style="mace"`` route; see the module docstring.
+
+    Mirrors the ``--format libtorch`` branch of MACE's own
+    ``mace.cli.create_lammps_model``: wrap the model in ``LAMMPS_MACE`` and
+    compile it with e3nn's ``jit.compile``. Unlike the production
+    ``lammps_pair_style="mliap"`` route (:func:`create_lammps_mliap_model`,
+    ``LAMMPS_MLIAP_MACE`` pickled with ``torch.save``), this needs no
+    ``cuequivariance``/GPU-Kokkos requirement to *run* -- ``pair_style mace``
+    works on a plain CPU build.
+
+    Args:
+        model_path: Path to the trained MACE model
+        head: Which model head to select for compilation
+        float32: Compile a 32-bit model
+        do_return_path: Return a pathlib.Path for the compiled model
+        out_path: Path to file to save the compiled model to
+
+    Returns:
+        If requested, path to the compiled model
+    """
+    import torch
+    from e3nn.util import jit
+    from mace.calculators import LAMMPS_MACE
+
+    if out_path is not None:
+        compiled_path = out_path
+    else:
+        compiled_path = model_path.parent / (model_path.name + "-lammps.pt")
+    model = torch.load(
+        f=model_path.resolve(),
+        map_location=torch.device(
+            "cuda" if torch.cuda.is_available() else "cpu"
+        ),
+        weights_only=False,
+    )
+
+    if hasattr(model, "heads"):
+        heads = model.heads
+    else:
+        heads = [None]
+
+    if len(heads) == 1:
+        print(
+            f"Only one head found in the model: {heads[0]}. Skipping selection."
+        )
+        head = heads[0]
+    else:
+        head = "Default" if head is None else head
+
+    if float32:
+        model = model.float().to("cpu")
+    else:
+        model = model.double().to("cpu")
+    lammps_model = (
+        LAMMPS_MACE(model, head=head)
+        if head is not None
+        else LAMMPS_MACE(model)
+    )
+    lammps_model_compiled = jit.compile(lammps_model)
+    lammps_model_compiled.save(compiled_path.resolve())
     return compiled_path if do_return_path else None
 
 
@@ -209,148 +315,87 @@ def run_lammps_from_template(
     return None
 
 
-def aggregate_uncertainties(
-    atom_pos: np.ndarray,
-    unit_cell: np.ndarray,
-    boundary_conditions: np.ndarray,
-    atomic_uncertainties: np.ndarray,
-    r_cut: float,
-) -> np.ndarray:
-    """Calculate the locally aggregated uncertainties for a single structure
-
-    Args:
-        atom_pos: Atomic positions, shape=(n_atoms, 3)
-        unit_cell: Unit cell, shape=(3, 3)
-        boundary_conditions: Array of booleans indicating boundary conditions,
-            shape=(3)
-        atomic_uncertainties: Atomic force uncertainties, shape=(n_atoms, 3)
-        r_cut: Cutoff radius defining the aggregation region
-
-    Returns:
-        Aggregated uncertainties for each atom, shape=(n_atoms)
-    """
-    radii = ase.geometry.get_distances(
-        atom_pos, cell=unit_cell, pbc=boundary_conditions
-    )[1]
-    mask = radii < r_cut
-    unc_mean = atomic_uncertainties.mean(axis=-1)
-    return (mask * unc_mean[np.newaxis, :]).sum(axis=1) / mask.sum(axis=1)
+# Logged by LAMMPS's fix halt when its condition is met.
+HALT_LOG_MARKER = "Fix halt condition"
 
 
-def select_max_uncertainty_frames(structs: list, bin_count: int) -> list:
-    """Pick the peak-uncertainty frame from each of ``bin_count`` segments.
-
-    Splits ``structs`` (which must each carry a per-atom ``uncertainties``
-    array and share a constant atom count) into ``bin_count`` equal contiguous
-    segments and returns, for each segment, the frame whose single most
-    uncertain atom is largest. ``len(structs)`` must be divisible by
-    ``bin_count`` (the caller trims the tail first).
-
-    This is the pure selection core of :func:`get_samples_from_dump`, split out
-    so the binning/argmax logic is unit-testable without MACE or LAMMPS.
-    """
-    num_atoms = np.array(structs).shape[1]
-    uncertainties = np.array([s.arrays["uncertainties"] for s in structs])
-    uncertainties = uncertainties.reshape((bin_count, -1, num_atoms))
-    segment_size = uncertainties.shape[1]
-    offsets = np.arange(0, bin_count * segment_size, segment_size)
-    indices = np.argmax(uncertainties.max(axis=2), axis=1) + offsets
-    return [structs[i] for i in indices]
+def halt_message(log_file: pathlib.Path) -> Optional[str]:
+    """The ``fix halt`` message in a LAMMPS log, or ``None`` if the run was
+    not halted."""
+    if not log_file.exists():
+        return None
+    with open(log_file, errors="replace") as f:
+        for line in f:
+            if HALT_LOG_MARKER in line:
+                return line.strip()
+    return None
 
 
-def get_samples_from_dump(
+def handle_halted_run(
+    outpath: pathlib.Path,
+    final_data_file: pathlib.Path,
     trajectory_file: pathlib.Path,
-    model_files: list,
     element_mapping: dict,
-    cutoff_radius: int,
-    bin_count: int,
-    samples_file: pathlib.Path,
-    logger: logging.Logger,
-    output_full_uncertainties_traj: bool = False,
-    full_file: pathlib.Path = None,
-    device: str = "cuda",
+    message: str,
 ) -> None:
-    """Sample from the given trajectory by dividing it into segments and
-    sampling the structure with the highest individual local uncertainty value
-    out of each segment.
+    """Set a halted run's outputs aside -- see the module docstring.
 
     Args:
-        trajectory_file: Path to lammps .dump output file to sample from
-        model_files: List of Paths to models to calculate committee
-            uncertainties with
-        element_mapping: Dict that maps the atom species number from the given
-            trajectory file (as strings) to the corresponding element symbol
-        cutoff_radius: cutoff radius (in Angstrom) for calculating the local
-            uncertainties
-        bin_count: number of segments to divide the trajectory into - if the
-            length of the trajectory is not evenly divisible by this number,
-            configurations will be removed from the end of the trajectory until
-            it is
-        samples_file: path to write the sampled structures to
-        logger: logger
-        output_full_uncertainties_traj: determines whether to additionally
-            output the full trajectory with attached uncertainties
-        full_file: if output_full_uncertainties_traj=True, the full trajectory
-            with attached uncertainties is output to this path
-        device: torch device for the MACE committee ("cuda" or "cpu").
+        outpath: The payload's ``out/`` directory.
+        final_data_file: The deck's ``write_data`` output, written at the
+            halt step.
+        trajectory_file: The converted trajectory to append the halt-time
+            frame to.
+        element_mapping: LAMMPS atom type (as a string) -> element symbol.
+        message: The ``fix halt`` log line.
     """
-    from mace.calculators.mace import MACECalculator
+    (outpath / "md_halted.info").write_text(message + "\n")
+    if not final_data_file.exists():
+        return
+    types = [int(t) for t in element_mapping]
+    atoms = ase.io.read(
+        final_data_file,
+        format="lammps-data",
+        Z_of_type={t: t for t in types},
+        atom_style="atomic",
+        units="metal",
+    )
+    for atom in atoms:
+        atom.symbol = element_mapping[str(atom.number)]
+    ase.io.write(trajectory_file, atoms, format="extxyz", append=True)
+    final_data_file.rename(outpath / "halted_final.data")
 
+
+def convert_dump_to_extxyz(
+    trajectory_file: pathlib.Path,
+    element_mapping: dict,
+    output_file: pathlib.Path,
+) -> None:
+    """Read a raw LAMMPS dump and write it as an extxyz trajectory with
+    correct chemical symbols applied.
+
+    Args:
+        trajectory_file: Path to the LAMMPS ``.dump`` output file
+        element_mapping: Dict that maps the atom species number from the
+            given trajectory file (as strings) to the corresponding element
+            symbol
+        output_file: Path to write the converted extxyz trajectory to
+    """
     structs = ase.io.read(
         trajectory_file, format="lammps-dump-text", index=":"
     )
-
-    mod = len(structs) % bin_count
-    if mod != 0:
-        logger.warning(
-            f"Input trajectory size of {len(structs)} is not evenly divisible "
-            f"by {bin_count} segments., Cutting last {mod} structures from "
-            f"trajectory to ensure evenly sized segments."
-        )
-        structs = structs[:-mod]
-
     for atoms in structs:
         for atom in atoms:
             atom.symbol = element_mapping[str(atom.number)]
-
-    with warnings.catch_warnings():
-        warnings.filterwarnings("ignore", category=FutureWarning)
-        warnings.filterwarnings("ignore", category=UserWarning)
-        model_calc = MACECalculator(
-            model_paths=model_files,
-            device=device,
-            default_dtype="float32",
-            enable_cueq=_cuet_available(),
-        )
-
-    for atoms in structs:
-        a = atoms.copy()
-        a.calc = model_calc
-        a.get_potential_energy()
-        forces = a.calc.results["forces_comm"]
-        stdev = np.std(forces, axis=0, ddof=1)
-        struct_uncertainties = aggregate_uncertainties(
-            atom_pos=a.get_positions(),
-            unit_cell=a.cell,
-            boundary_conditions=a.pbc,
-            atomic_uncertainties=stdev,
-            r_cut=cutoff_radius,
-        )
-        atoms.arrays["uncertainties"] = struct_uncertainties
-
-    if output_full_uncertainties_traj and full_file is not None:
-        ase.io.write(full_file, structs, format="extxyz")
-
-    max_structs = select_max_uncertainty_frames(structs, bin_count)
-    ase.io.write(samples_file, max_structs, format="extxyz")
+    ase.io.write(output_file, structs, format="extxyz")
 
 
 def main(argv: Optional[list] = None) -> None:
-    """Cluster-side entry point: run one LAMMPS committee-sampling job.
+    """Cluster-side entry point: run one LAMMPS MD sampling job.
 
     Reads the ``LammpsSamplingInput`` JSON named by ``argv[1]``, runs the MD,
-    selects candidates, and writes the ``is_finished.info`` success marker that
-    ``SingleScriptTask.finish_check`` polls on the host.
+    converts the trajectory, and writes the ``is_finished.info`` success
+    marker that ``SingleScriptTask.finish_check`` polls on the host.
     """
     from lammps_al.run.inputs import LammpsSamplingInput
 
@@ -361,12 +406,6 @@ def main(argv: Optional[list] = None) -> None:
     input_config = LammpsSamplingInput.from_file(inputfile)
     input_config.validate(calcpath)
 
-    # The MACE LAMMPS-MLIAP interface defaults to GPU and raises on CPU tensors
-    # ("Set MACE_ALLOW_CPU=true ..."). When the run is CPU-bound, opt in so the
-    # lmp subprocess (which inherits this env) can compute on CPU.
-    if input_config.device == "cpu":
-        os.environ["MACE_ALLOW_CPU"] = "true"
-
     outpath = calcpath / "out"
     os.makedirs(outpath, exist_ok=False)
 
@@ -376,16 +415,25 @@ def main(argv: Optional[list] = None) -> None:
     model_paths = [calcpath / p for p in input_config.model_files]
 
     config_path = outpath / input_config.lammps_config_name
-    samples_file = outpath / "samples.xyz"
-    full_traj_file = outpath / "traj+uncertainties.xyz"
+    trajectory_file = outpath / "trajectory.extxyz"
 
-    mliap_path = create_lammps_mliap_model(
-        model_path=model_paths[0],
-        do_return_path=True,
-        enable_cueq=input_config.enable_cueq,
-    )
+    if input_config.backend != "mace":
+        # ACE's `pair_style pace` and GRACE's `pair_style grace` read their
+        # potential file/directory directly -- no compile step.
+        compiled_model_path = model_paths[0]
+    elif input_config.lammps_pair_style == "mace":
+        compiled_model_path = create_lammps_mace_model(
+            model_path=model_paths[0],
+            do_return_path=True,
+        )
+    else:
+        compiled_model_path = create_lammps_mliap_model(
+            model_path=model_paths[0],
+            do_return_path=True,
+            enable_cueq=input_config.enable_cueq,
+        )
 
-    trajectory = run_lammps_from_template(
+    dump_file = run_lammps_from_template(
         lmp_cmd=lammps_path,
         log_file=outpath / "lmp.log",
         input_file=config_path,
@@ -393,27 +441,45 @@ def main(argv: Optional[list] = None) -> None:
         template_file_name=template_file_name,
         logger=logging.getLogger(),
         lammps_args=input_config.lammps_args,
-        model_file=mliap_path,
+        lammps_pair_style=input_config.lammps_pair_style,
+        model_file=compiled_model_path,
         data_file=data_path,
         seed=input_config.seed,
         dump_file=outpath / "md_sampling.dump",
+        # Steps between dumped frames; falls back to every step (the old
+        # hardcoded template value) when unset -- see
+        # LammpsSamplingInput.dump_frequency's docstring for why this
+        # matters (an unthinned dump can reach tens of GB in minutes on a
+        # large system).
+        dump_frequency=input_config.dump_frequency or 1,
+        # Literal, not lammps_al.run.inputs.FINAL_DATA_NAME: this payload
+        # imports the *cluster* env's lammps_al, which may predate that
+        # constant. test_sampler.py checks the two agree.
         final_data_file=outpath / "surface_final.data",
         do_return_path=True,
         trj_file_key="dump_file",
+        # Arbitrary schedule/template parameters (e.g. temperature/timestep/
+        # n_run), forwarded verbatim -- see
+        # LammpsSamplingInput.extra_template_kwargs's docstring.
+        **input_config.extra_template_kwargs,
     )
 
-    get_samples_from_dump(
-        trajectory_file=trajectory,
-        model_files=model_paths,
+    convert_dump_to_extxyz(
+        trajectory_file=dump_file,
         element_mapping=input_config.element_mapping,
-        cutoff_radius=input_config.cutoff_radius,
-        bin_count=input_config.bin_count,
-        samples_file=samples_file,
-        output_full_uncertainties_traj=True,
-        full_file=full_traj_file,
-        logger=logging.getLogger(),
-        device=input_config.device,
+        output_file=trajectory_file,
     )
+
+    halted = halt_message(outpath / "lmp.log")
+    if halted is not None:
+        logging.getLogger().warning("LAMMPS run halted early: %s", halted)
+        handle_halted_run(
+            outpath=outpath,
+            final_data_file=outpath / "surface_final.data",
+            trajectory_file=trajectory_file,
+            element_mapping=input_config.element_mapping,
+            message=halted,
+        )
 
     # Success marker checked by SingleScriptTask.finish_check on the host.
     (calcpath / "is_finished.info").write_text("LAMMPS sampling finished")

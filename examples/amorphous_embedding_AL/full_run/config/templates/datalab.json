@@ -1,0 +1,14 @@
+{
+    "remote_machine": "datalab",
+    "partition": "GPU-a40,GPU-a100",
+    "savepath": "/home/nico.unglert/dump/remote_handler/savepath",
+    "conda_env": "ace_gpu_train",
+    "conda_env_dir": "/share/theochem/nico.unglert/conda_envs",
+    "conda_source": "/home/nico.unglert/miniconda3/bin/activate",
+    "slurm_header_add": "export TMPDIR=~/dump",
+    "template": "datalab.sh.j2",
+    "environment": {},
+    "resilient_connection": true,
+    "connection_retry_interval": 60,
+    "connection_max_wait": null
+}

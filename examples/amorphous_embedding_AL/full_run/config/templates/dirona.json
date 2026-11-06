@@ -1,0 +1,12 @@
+{
+    "remote_machine": "dirona",
+    "partition": "normal",
+    "savepath": "/home/nunglert/dump/remote_handler/data",
+    "conda_env": "lammps_al",
+    "conda_source": "/home/nunglert/miniconda3",
+    "slurm_header_add": "",
+    "template": "dirona.sh.j2",
+    "environment": {
+        "vasp": "#SBATCH --mem=100G\nmodule purge\nmodule load vasp/6.4.2_intel\nsource /opt/intel/oneapi/setvars.sh --force\nexport VASP_PP_PATH=/home/nunglert/cellar/vasp/paw"
+    }
+}

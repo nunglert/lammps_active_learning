@@ -10,8 +10,13 @@ boundary    p p p
 read_data   {{ data_file }}
 
 
+{% if lammps_pair_style == "mace" %}
+pair_style  mace
+pair_coeff  * * ${model_file} Co Cu H O
+{% else %}
 pair_style  mliap unified ${model_file} 0
 pair_coeff  * * Co Cu H O
+{% endif %}
 
 mass        1       58.933
 mass        2       63.546
@@ -19,12 +24,12 @@ mass        3       1.008
 mass        4       15.999
 
 
-velocity    all create 300 {{ seed }} dist gaussian rot yes mom yes sum yes
+velocity    all create 300 {{ seed }} dist gaussian rot yes mom yes sum no
 
 thermo          100
 thermo_style    custom step temp etotal press
 
-dump    d_nvt   all custom 1 {{ dump_file }} id type xu yu zu vx vy vz
+dump    d_nvt   all custom {{ dump_frequency }} {{ dump_file }} id type xu yu zu vx vy vz
 
 #########################################################
 #Equilibrate everything at room temperature        

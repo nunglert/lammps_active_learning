@@ -1,18 +1,29 @@
 """End-to-end smoke test of the payload against a real MACE-enabled LAMMPS.
 
-This is the only tier that needs the ``lmp`` binary (built with ML-IAP +
-MLIAP-Python + KOKKOS and a ``mace`` importable in its Python), so it
-**self-skips** unless a MACE-enabled ``lmp`` is on PATH -- exactly how
-remote_handler's ``slurm``/``sshlive`` tiers self-skip. It runs on any machine
-(dev box, cluster) that has such a build, and in CI via the prebuilt
-``lammps-mace`` image (see ``docker/Dockerfile.lammps-mace`` and the
-``lammps-smoke`` CI job).
+This is the only tier that needs the ``lmp`` binary and a ``mace`` importable
+in the host Python, so it **self-skips** unless a MACE-enabled ``lmp`` is on
+PATH -- exactly how remote_handler's ``slurm``/``sshlive`` tiers self-skip.
+It runs on any machine (dev box, cluster) that has such a build, and in CI via
+the prebuilt ``lammps-mace`` image (see ``docker/Dockerfile.lammps-mace`` and
+the ``lammps-smoke`` CI job) -- and the exact same image is how to reproduce
+this tier locally (see that Dockerfile's header for the `docker run`
+invocation).
 
 It drives the payload's ``main`` on CPU over a tiny system for a handful of MD
-steps and asserts a non-empty ``out/samples.xyz`` is produced -- proving the
-``pair_style mliap unified`` MACE coupling loads and runs, and that the
-compile -> run -> committee-score -> select pipeline holds together. The
-numerics are not asserted (a 5-step CPU run is a functional smoke test).
+steps and asserts a non-empty ``out/trajectory.extxyz`` is produced -- proving
+the compile -> run -> convert pipeline holds together (this payload is
+MD-only now; committee scoring is a separate payload/stage, see
+``test_committee_scoring.py``). The numerics are not asserted (a 5-step CPU
+run is a functional smoke test).
+
+Explicitly requests ``lammps_pair_style="mace"`` (LAMMPS's native
+``pair_style mace``, the ``ML-MACE`` package): unlike the default
+``"mliap"`` (the ML-IAP ``mliap unified`` bridge, which needs LAMMPS's
+Kokkos-CUDA-only ghost-atom message passing for any multi-layer MACE model),
+``"mace"`` runs correctly CPU-only, so this tier gives real coverage in CI
+and on a plain dev laptop, not just on a GPU cluster. This does **not**
+change the sampler's production default -- see ``lammps_sampling.py``'s
+module docstring.
 """
 
 import importlib.util
@@ -34,8 +45,9 @@ _TEMPLATE = _REPO / "test/data/lammps/smoke.in.template"
 # LAMMPS dump 'type' -> element, matching the template's `pair_coeff * * Co Cu H O`.
 _ELEMENT_MAPPING = {"1": "Co", "2": "Cu", "3": "H", "4": "O"}
 
-# CPU KOKKOS (OpenMP) accelerator flags -- the non-GPU analogue of the default.
-_CPU_LAMMPS_ARGS = "-k on t 1 -sf kk -pk kokkos newton on neigh half"
+# `pair_style mace` needs no accelerator flags at all on a CPU-only build
+# (unlike the old ML-IAP route's Kokkos-OpenMP requirement).
+_CPU_LAMMPS_ARGS = ""
 
 _LMP = (
     shutil.which("lmp") or shutil.which("lmp_kokkos") or shutil.which("lammps")
@@ -75,24 +87,25 @@ def test_full_payload_smoke(tmp_path):
         "model_files": model_names,
         "lammps_config_name": "lammps.in",
         "element_mapping": _ELEMENT_MAPPING,
-        "cutoff_radius": 4.0,
-        "bin_count": 2,
         "seed": 12345,
         "lammps_args": _CPU_LAMMPS_ARGS,
         "device": "cpu",
-        "enable_cueq": False,  # plain e3nn compile: no cuequivariance on CPU
+        "lammps_pair_style": "mace",
     }
     input_file = calc / "input_sample.json"
     input_file.write_text(json.dumps(config))
 
     payload.main([None, str(input_file)])
 
-    # The job wrote its success marker and a non-empty candidate set.
+    # The job wrote its success marker and a non-empty trajectory.
     assert (calc / "is_finished.info").exists()
-    samples = calc / "out" / "samples.xyz"
-    assert samples.exists()
+    trajectory = calc / "out" / "trajectory.extxyz"
+    assert trajectory.exists()
 
     import ase.io
 
-    selected = ase.io.read(samples, index=":")
-    assert len(selected) == config["bin_count"]
+    frames = ase.io.read(trajectory, index=":")
+    assert len(frames) > 0
+    assert set(frames[0].get_chemical_symbols()) <= set(
+        _ELEMENT_MAPPING.values()
+    )

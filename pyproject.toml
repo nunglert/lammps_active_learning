@@ -28,22 +28,72 @@ dependencies = [
 readme = "README.md"
 
 [project.optional-dependencies]
-# Run side: the host-side sampler needs remote_handler; the cluster conda env
-# that runs the shipped payload additionally needs a MACE stack (mace-torch +
-# cuequivariance, via remote_handler's [mace_freeze] extra), torch, and a
-# LAMMPS build with the MLIAP/MACE interface. Installing this on the cluster
-# also brings lammps_al itself (for the LammpsSamplingInput schema).
 run = [
-    "remote_handler[dev,mace_freeze] @ git+ssh://git@gitlab.tuwien.ac.at/e165-03-1_theoretische_materialchemie/madsen-s-research-group/remote_handler.git@dev-NU",
+    "remote_handler[dev] @ git+https://github.com/nunglert/remote_handler.git@main",
+]
+ace = [
+    "remote_handler[ace] @ git+https://github.com/nunglert/remote_handler.git@main",
+]
+grace = [
+    "remote_handler[grace] @ git+https://github.com/nunglert/remote_handler.git@main",
+]
+mace = [
+    "remote_handler[mace_freeze] @ git+https://github.com/nunglert/remote_handler.git@main",
+]
+# GPU-accelerated ACE fitting (pacemaker's `tensorpot` backend) AND
+# GPU-accelerated ACE committee-uncertainty scoring
+# (lammps_al.select.scripts.committee_selection's backend="ace" path) --
+# both via the *old*, pre-GRACE-rename tensorpotential API (see
+# remote_handler's own [ace_tensorpot_gpu] extra comment). Install in its
+# own dedicated environment -- mutually exclusive with [grace] (see above).
+# Deliberately NOT included in [all], for the same reason. matscipy (a
+# normal, portable PyPI package -- unlike the old tensorpotential snapshot,
+# no special version pins) is declared directly here since it's a direct
+# dependency of this repo's own committee_selection payload, not something
+# remote_handler needs to know about; confirmed substantially faster than
+# ASE's own neighbor list at real campaign scale.
+ace_tensorpot_gpu = [
+    "remote_handler[ace_tensorpot_gpu] @ git+https://github.com/nunglert/remote_handler.git@main",
+    "matscipy",
+]
+# ovito's plain PyPI wheel doesn't bundle its own Qt/OpenGL libs and fails
+# to import on a headless cluster node missing system libOpenGL.so.0
+# (confirmed on dirona) -- install it via conda instead (ovito's own
+# import-time warning recommends this too: "conda install
+# --strict-channel-priority -c https://conda.ovito.org -c conda-forge
+# ovito=3.16.1"), then `pip install` this extra as normal
+embedding = [
+    "ovito"
+]
+dashboard = [
+    "alviz @ git+https://github.com/nunglert/alviz.git@main",
+    # RDFs in panels.box_structure (structure_stats.compute_partial_rdf) --
+    # same portable PyPI package as ace_tensorpot_gpu's matscipy, just also
+    # needed here, independent of that extra.
+    "matscipy",
+    # The CLI's dashboard.yaml config (lammps_al.dashboard.cli).
+    "pyyaml",
+]
+# DFT-D3 for lammps_al.label.VaspD3Evaluator's payload (simple-dft-d3's
+# Python API, prebuilt manylinux wheels; only cffi + numpy). Needed in the
+# cluster env that runs the VASP jobs, not on the driver.
+label = [
+    "dftd3>=1.0",
 ]
 dev = [
     "pytest",
     "pytest-cov",
     "pre-commit",
 ]
+# The sensible default bundle -- every committee backend except
+# [ace_tensorpot_gpu], which needs its own dedicated environment and would
+# conflict with [grace] here (see that extra's comment above).
 all = [
-    "lammps_active_learning[dev,run]"
+    "lammps_active_learning[dev,run,ace,grace,mace,embedding,dashboard,label]"
 ]
+
+[project.scripts]
+lammps-al = "lammps_al.__main__:main"
 
 [tool.setuptools_scm]
 # Single source of truth for the version is the git tag (mirrors jaxrens_al).
@@ -54,6 +104,13 @@ fallback_version = "0.0.0"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+# Ship the amorphous-embedding sampler's default anneal deck template inside
+# the installed package; without this it is missing from a real
+# (non-editable) install (editable installs mask this by pointing back at
+# src/).
+[tool.setuptools.package-data]
+lammps_al = ["embedding/scripts/templates/*.j2"]
 
 [tool.pytest.ini_options]
 testpaths = ["test"]

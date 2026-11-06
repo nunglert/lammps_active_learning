@@ -1,0 +1,135 @@
+name: CI
+
+# Installs the package with all its dependencies and runs the tests. The
+# install IS the check: it exercises the real dependency pipeline
+# (remote_handler and alviz from public GitHub, mace/ace/grace stacks from
+# public GitHub/PyPI -- no tokens needed).
+#
+# Two jobs:
+#   * test          -- everything except the `lammps` tier, on python:3.13.
+#   * lammps-smoke  -- the real-binary LAMMPS tier, inside the prebuilt
+#                      MACE-LAMMPS image that lammps-image.yml publishes to
+#                      GHCR. That image must have been built once (run the
+#                      "LAMMPS image" workflow manually) before this job can
+#                      pass.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Weekly run: the safety net against API drift in remote_handler -- nothing
+  # changed here, but its main may have moved.
+  schedule:
+    - cron: "0 4 * * 1"
+  workflow_dispatch:
+
+# A newer push to the same branch/PR supersedes the running one.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    container: python:3.13
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history + tags so setuptools-scm derives the version (a
+          # shallow clone would fall back to fallback_version = 0.0.0).
+          fetch-depth: 0
+
+      # The checkout is owned by a different uid than the container's root;
+      # without this, git (and so setuptools-scm) refuses to read it.
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Install package with all extras
+        run: |
+          python -V
+          pip install --upgrade pip
+          # Heavy (torch/mace), but the resolve is the dependency check.
+          pip install ".[all]"
+          python -c "import lammps_al; from lammps_al.run.sampler import LammpsSampler; print('install OK')"
+
+      # -m 'not lammps': the real-binary smoke test runs in lammps-smoke
+      # below, on the MACE-LAMMPS image. The lammps tier self-skips here
+      # anyway, but excluding it is explicit.
+      - name: Run tests
+        run: pytest -ra -m 'not lammps' --junitxml=report.xml
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: test-report
+          path: report.xml
+
+  # Real end-to-end LAMMPS smoke test on the prebuilt MACE-LAMMPS image (see
+  # docker/Dockerfile.lammps-mace). The image already ships lmp + mace-torch +
+  # torch (CPU); here we add remote_handler (base, no mace extra) + this
+  # package without reinstalling the heavy stack, then run only the `lammps`
+  # tier. Hosted runners pull the image fresh every run, so the :cpu tag is
+  # always the latest published build.
+  #
+  # continue-on-error: this tier depends on an external image + registry, so
+  # a missing image or a pull hiccup shouldn't fail the whole run.
+  lammps-smoke:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    container:
+      image: ghcr.io/${{ github.repository }}/lammps-mace:cpu
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Install remote_handler and this package
+        run: |
+          pip install --no-cache-dir \
+            "remote_handler @ git+https://github.com/nunglert/remote_handler.git@main"
+          # NOT [run]: the heavy mace/torch stack is already in the image, and
+          # remote_handler was installed above. Base + [dev] are light and
+          # won't touch torch/mace.
+          pip install --no-cache-dir ".[dev]"
+
+      # None of these fail the job.
+      - name: LAMMPS diagnostics
+        run: |
+          # Which LAMMPS is baked into THIS image?
+          cat /opt/lammps-build-info.txt || echo "no build-info: OLD image"
+          command -v lmp && echo "lmp found" || echo "lmp NOT on PATH"
+          # Missing shared libraries (e.g. libtorch) show up as "not found".
+          ldd "$(command -v lmp)" 2>&1 || true
+          # Does it actually run + list packages (ML-MACE must be present)?
+          lmp -h > lmp_help.txt 2>&1; echo "lmp -h exit=$?"
+          grep -iA40 "Installed packages" lmp_help.txt || tail -30 lmp_help.txt || true
+
+      # -s + live logs: the payload logs LAMMPS's own stderr on a failed run,
+      # so a runtime lmp error is visible here. --basetemp under the
+      # workspace so the run's out/lmp.log + dump land in the artifacts.
+      - name: Run lammps tier
+        run: >-
+          pytest -ra -m lammps -s --log-cli-level=INFO
+          --basetemp="$GITHUB_WORKSPACE/pytest-tmp"
+          --junitxml=report-lammps.xml
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lammps-smoke
+          path: |
+            lmp_help.txt
+            pytest-tmp/
+            report-lammps.xml

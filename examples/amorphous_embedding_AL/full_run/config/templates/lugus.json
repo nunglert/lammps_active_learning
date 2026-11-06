@@ -1,0 +1,9 @@
+{
+    "remote_machine": "lugus",
+    "partition": "normal",
+    "savepath": "/home/nunglert/dump/remote_handler/train",
+    "conda_env": "lammps_al",
+    "conda_source": "/home/nunglert/miniconda3",
+    "slurm_header_add": "",
+    "template": "lugus.sh.j2"
+}

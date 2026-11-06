@@ -1,0 +1,13 @@
+#!/bin/bash
+#SBATCH --job-name={{ jobname }}
+#SBATCH --partition={{ partition }}
+#SBATCH --ntasks={{ n_cores }}
+{% if memory %}#SBATCH --mem={{ memory }}{% endif %}
+{{ slurm_header_add }}
+echo "Running on host: $(hostname)"
+
+set -euo pipefail
+
+{{ conda_activation }}
+
+{% include job_type_template %}

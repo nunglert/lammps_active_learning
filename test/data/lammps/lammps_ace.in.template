@@ -1,0 +1,46 @@
+# Git-tracked copy of experiments/rough_cu_water_al/config/templates/
+# lammps_ace.in.template (that tree is gitignored -- campaign-specific
+# working files -- so it doesn't exist in a fresh clone/CI checkout).
+# test_ace_template_dump_frequency_is_rendered_not_hardcoded in
+# test/test_payload_unit.py renders THIS file as a regression guard against
+# the dump line reverting to a hardcoded frequency. Keep in sync by hand
+# when the real template changes.
+variable    dt equal 0.0005
+variable model_file index {{ model_file }}
+
+units       metal
+atom_style  atomic
+atom_modify map yes
+newton      on
+boundary    p p p
+
+read_data   {{ data_file }}
+
+# {{ lammps_pair_style }} is the literal pair_style line for backend="ace"/
+# "grace" (no compile step, unlike MACE's mliap/mace fork -- see
+# lammps_sampling.py's module docstring). For ACE: "pace".
+pair_style  {{ lammps_pair_style }}
+pair_coeff  * *     ${model_file} Cu H O
+
+mass        1       63.546
+mass        2       1.008
+mass        3       15.999
+
+velocity    all create 300 {{ seed }} dist gaussian rot yes mom yes sum no
+
+thermo          100
+thermo_style    custom step temp etotal press
+
+dump    d_nvt   all custom {{ dump_frequency }} {{ dump_file }} id type xu yu zu vx vy vz
+
+#########################################################
+# Committee-driven NVT sampling run
+#########################################################
+
+fix     md_nvt  all nvt temp 300 300 $(100.0*dt)
+
+run     2000
+
+unfix   md_nvt
+
+write_data {{ final_data_file }}

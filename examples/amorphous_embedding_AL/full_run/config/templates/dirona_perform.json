@@ -1,0 +1,12 @@
+{
+    "remote_machine": "dirona",
+    "partition": "perform",
+    "savepath": "/home/nunglert/dump/remote_handler/data",
+    "conda_env": "lammps_al",
+    "conda_source": "/home/nunglert/miniconda3",
+    "slurm_header_add": "",
+    "template": "dirona.sh.j2",
+    "environment": {
+        "vasp": "#SBATCH --mem=400G\n#SBATCH --exclusive\n#SBATCH --hint=nomultithread\nmodule purge\nmodule load vasp/6.4.2_intel\nsource /opt/intel/oneapi/setvars.sh --force\nexport VASP_PP_PATH=/home/nunglert/cellar/vasp/paw\nexport OMP_NUM_THREADS=1\nexport MKL_NUM_THREADS=1\nexport I_MPI_PIN_RESPECT_CPUSET=0"
+    }
+}

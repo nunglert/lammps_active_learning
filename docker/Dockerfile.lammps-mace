@@ -1,39 +1,44 @@
-# CPU MACE-enabled LAMMPS image for the `lammps-smoke` CI job.
+# CPU MACE-enabled LAMMPS image for the `lammps-smoke` CI job (and for local
+# `docker run` parity with CI -- see the bottom of this comment block).
 #
-# Builds LAMMPS from source with the ML-IAP *Python* coupling that the payload
-# uses (`pair_style mliap unified <model.pt> ...`), plus KOKKOS (OpenMP) so the
-# `-sf kk` accelerator flags work on CPU. `mace-torch` (and torch, CPU) are
-# pip-installed into the same interpreter LAMMPS links, because the mliap model
-# is a pickled MACE object loaded through LAMMPS's embedded Python at runtime.
+# Builds LAMMPS with MACE's *native* `pair_style mace` (the `ML-MACE` package,
+# linked against LibTorch directly), NOT the ML-IAP Python bridge
+# (`pair_style mliap unified`) this image used to build. That switch is
+# deliberate, not cosmetic: for any MACE model with more than one interaction
+# layer (i.e. essentially every real model -- MACE's default is 2), the
+# ML-IAP route needs LAMMPS's ghost-atom message-passing hooks
+# (`forward_exchange`/`reverse_exchange`), which are Kokkos-CUDA-only --
+# confirmed by building both the ACEsuit fork and vanilla upstream `develop`
+# and hitting `AttributeError: ... object has no attribute 'forward_exchange'`
+# on CPU either way. `pair_style mace` has no such limitation: the exact same
+# plugin builds and runs correctly CPU-only (this image) or GPU/Kokkos
+# (production), with identical LAMMPS-input syntax either way -- see
+# https://mace-docs.readthedocs.io/en/latest/guide/lammps.html.
 #
 # Two ways to build & push (the install cost is paid once, not per-pipeline):
 #
-#   A) In CI: run the manual `build-lammps-image` job (kaniko) in .gitlab-ci.yml.
-#      It pushes to $CI_REGISTRY_IMAGE/lammps-mace:cpu automatically.
+#   A) In CI: run the "LAMMPS image" workflow (.github/workflows/
+#      lammps-image.yml) manually. It pushes to
+#      ghcr.io/<owner>/<repo>/lammps-mace:cpu automatically.
 #
-#   B) Locally (easier to iterate while validating the Dockerfile). Get the
-#      registry path from the project's Container Registry page or `echo
-#      $CI_REGISTRY_IMAGE` in a CI job -- do NOT hardcode a registry hostname,
-#      it is instance-specific:
-#        REG=<your $CI_REGISTRY, e.g. gitlab.tuwien.ac.at:5050>
-#        IMG=$REG/e165-03-1_theoretische_materialchemie/madsen-s-research-group/lammps_active_learning/lammps-mace:cpu
-#        docker login "$REG"
-#        docker build -f docker/Dockerfile.lammps-mace -t "$IMG" .
-#        docker push "$IMG"
+#   B) Locally (easier to iterate while validating the Dockerfile, and this is
+#      also how to get the SAME environment CI tests in for local dev/debugging
+#      -- no separate "local setup", just run the test suite inside the image):
+#        docker build -f docker/Dockerfile.lammps-mace -t lammps-mace:cpu .
+#        docker run --rm -v "$PWD":/work -w /work lammps-mace:cpu \
+#            bash -c "pip install --no-cache-dir '.[dev]' && pytest -m lammps -s"
+#      To push a local build to GHCR instead (needs a GitHub token with the
+#      write:packages scope):
+#        IMG=ghcr.io/nunglert/lammps_active_learning/lammps-mace:cpu
+#        docker login ghcr.io && docker build -f docker/Dockerfile.lammps-mace -t "$IMG" . && docker push "$IMG"
 #
-# NOTE: this recipe is the documented mliap-python + KOKKOS build, but the exact
-# LAMMPS_VERSION / flag set should be validated with one real build+run of the
-# `lammps` test tier before the CI job is flipped from manual to automatic.
 
 FROM python:3.11-slim
 
-# LAMMPS must be the MACE-matched build: mace-torch's LAMMPS forward calls
-# MLIAP message-passing exchange methods (data.forward_exchange /
-# reverse_exchange) that only exist in the ACEsuit LAMMPS fork (and recent
-# upstream). Stock upstream stable_2Aug2023 is too old -> AttributeError:
-# 'MLIAPDataPy' object has no attribute 'forward_exchange'. Override these ARGs
-# to match the exact source/commit of a known-good build (e.g. the group's
-# existing .../build-mliap/lmp) if this pairing doesn't match your mace-torch.
+# PKG_ML-MACE is ACEsuit's own contributed LAMMPS package -- not (yet) in
+# upstream lammps/lammps, so this stays on their fork/branch (unlike the old
+# ML-IAP route, switching source repo here doesn't matter for correctness;
+# the ACEsuit `mace` branch is simply where this package lives).
 ARG LAMMPS_REPO=https://github.com/ACEsuit/lammps.git
 ARG LAMMPS_BRANCH=mace
 ARG MACE_VERSION=0.3.14
@@ -44,36 +49,49 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libopenmpi-dev openmpi-bin \
     && rm -rf /var/lib/apt/lists/*
 
-# CPU torch + MACE + the tools the MLIAP-Python build needs (cython), in the
-# interpreter LAMMPS will embed.
+# CPU torch + MACE in the interpreter that will compile committee models for
+# LAMMPS (create_lammps_mace_model / mace.cli.create_lammps_model) and score
+# committee uncertainty (MACECalculator) -- both plain Python, no LAMMPS
+# embedding needed. LAMMPS itself links against this same torch install's
+# bundled LibTorch (via torch.utils.cmake_prefix_path below), so the ABI the
+# plugin was compiled against always matches the one used to compile models.
+# mkl-include: pip-installed torch's CMake config unconditionally
+# find_package(MKL)'s for its include dir even on the CPU (non-MKL-linked)
+# wheel; without this the LAMMPS cmake configure fails with
+# "Imported target torch includes non-existent path ...MKL_INCLUDE_DIR-
+# NOTFOUND". Installs headers under /usr/local/include (a default search
+# path) -- no MKL runtime/linking actually needed for CPU inference.
 RUN pip install --no-cache-dir \
         --extra-index-url https://download.pytorch.org/whl/cpu \
         torch \
-    && pip install --no-cache-dir "mace-torch==${MACE_VERSION}" cython numpy
+    && pip install --no-cache-dir "mace-torch==${MACE_VERSION}" mkl-include
 
-# Build LAMMPS with ML-IAP (+ Python coupling) and KOKKOS/OpenMP.
-RUN git clone --depth 1 --branch ${LAMMPS_BRANCH} \
-        ${LAMMPS_REPO} /opt/lammps
+# Build LAMMPS with the native ML-MACE package (CPU: PKG_OPENMP/BUILD_OMP, no
+# Kokkos -- see header comment for why Kokkos is a GPU-only production
+# concern here, not a CPU build requirement).
+# Record the exact source in the image so a running job can prove which build
+# it is (cat /opt/lammps-build-info.txt) -- mutable :cpu tags make this
+# essential.
+RUN git clone --depth 1 --branch ${LAMMPS_BRANCH} ${LAMMPS_REPO} /opt/lammps \
+    && printf 'repo=%s\nbranch=%s\ncommit=%s\n' \
+        "${LAMMPS_REPO}" "${LAMMPS_BRANCH}" \
+        "$(git -C /opt/lammps rev-parse HEAD)" \
+        > /opt/lammps-build-info.txt \
+    && cat /opt/lammps-build-info.txt
 WORKDIR /opt/lammps/build
 RUN cmake ../cmake \
         -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_CXX_STANDARD=20 \
+        -DCMAKE_CXX_STANDARD_REQUIRED=ON \
         -DBUILD_SHARED_LIBS=ON \
-        -DBUILD_MPI=OFF \
-        -DPKG_PYTHON=ON \
-        -DPKG_ML-IAP=ON \
-        -DPKG_ML-SNAP=ON \
-        -DMLIAP_ENABLE_PYTHON=ON \
-        -DPKG_KOKKOS=ON \
-        -DKokkos_ENABLE_OPENMP=ON \
-        -DKokkos_ARCH_NATIVE=ON \
-        -DPYTHON_EXECUTABLE=$(which python) \
+        -DBUILD_MPI=ON \
+        -DBUILD_OMP=ON \
+        -DPKG_OPENMP=ON \
+        -DPKG_ML-MACE=ON \
+        -DCMAKE_PREFIX_PATH="$(python -c 'import torch; print(torch.utils.cmake_prefix_path)')" \
     && cmake --build . -j "$(nproc)" \
     && cmake --install . \
     && ln -sf /opt/lammps/build/lmp /usr/local/bin/lmp
-
-# Make the freshly built LAMMPS Python module importable (mliap unified imports
-# `lammps` / the mliappy bridge from here).
-RUN cd /opt/lammps/python && pip install --no-cache-dir .
 
 ENV OMP_NUM_THREADS=1
 WORKDIR /work

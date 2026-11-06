@@ -1,0 +1,11 @@
+{
+  "remote_machine": "musica",
+  "partition": "zen4_0768",
+  "conda_env": "ace_gpu_train",
+  "conda_source": "/data/fs201236/nu90319/miniconda3/bin/activate",
+  "savepath": "/data/fs201236/nu90319/dump/remote_handler_ace_gpu_train_cpu",
+  "template": "musica.sh.j2",
+  "resilient_connection": true,
+  "connection_retry_interval": 60,
+  "connection_max_wait": null
+}
