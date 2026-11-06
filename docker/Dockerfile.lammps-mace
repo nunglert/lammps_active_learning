@@ -83,6 +83,7 @@ RUN cmake ../cmake \
         -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_CXX_STANDARD=20 \
         -DCMAKE_CXX_STANDARD_REQUIRED=ON \
+        -DCMAKE_POLICY_DEFAULT_CMP0057=NEW \
         -DBUILD_SHARED_LIBS=ON \
         -DBUILD_MPI=ON \
         -DBUILD_OMP=ON \
