@@ -17,9 +17,10 @@
 #
 # Two ways to build & push (the install cost is paid once, not per-pipeline):
 #
-#   A) In CI: run the "LAMMPS image" workflow (.github/workflows/
-#      lammps-image.yml) manually. It pushes to
-#      ghcr.io/<owner>/<repo>/lammps-mace:cpu automatically.
+#   A) In CI: the `build-image` job in .github/workflows/ci.yml rebuilds it
+#      whenever this file changes, weekly, and on a manual CI run
+#      (workflow_dispatch). On main it pushes to
+#      ghcr.io/<owner>/<repo>/lammps-mace:cpu.
 #
 #   B) Locally (easier to iterate while validating the Dockerfile, and this is
 #      also how to get the SAME environment CI tests in for local dev/debugging

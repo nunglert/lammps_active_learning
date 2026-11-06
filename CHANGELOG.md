@@ -21,9 +21,13 @@ the new `## [X.Y.Z] — YYYY-MM-DD`, add a fresh empty `[Unreleased]`, then tag.
   token. `remote_handler` is pinned to `main` instead of `dev-NU`.
 - **The MACE-LAMMPS image lives on GHCR**
   (`ghcr.io/nunglert/lammps_active_learning/lammps-mace:cpu`), built by the
-  "LAMMPS image" workflow. The `resolve-lammps-image` digest lookup is gone:
-  GitHub-hosted runners pull the image fresh on every run, so a stale
-  node-cached `:cpu` tag can't happen.
+  `build-image` job in CI. As on GitLab, it only rebuilds when the Dockerfile
+  changes, weekly, or on a manual run, and `lammps-smoke` waits for it. A PR
+  that changes the Dockerfile now pushes its own `:pr-<number>` tag and
+  smoke-tests that, instead of overwriting `:cpu` before the merge. The
+  `resolve-lammps-image` digest lookup is gone: GitHub-hosted runners pull
+  the image fresh on every run, so a stale node-cached `:cpu` tag can't
+  happen.
 
 ### Fixed
 - **`lammps-smoke` failed with `invalid pull policy ([Always]) ... not one of
